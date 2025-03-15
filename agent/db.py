@@ -14,10 +14,10 @@ try:
     from .android_config import SIMILARITY_THRESHOLD
 except ImportError:
     try:
-        from .config import (
-            DB_FILE, CONTEXT_MSG_COUNT, MAX_SIMILAR_EXAMPLES,
-            SIMILARITY_THRESHOLD
-        )
+from .config import (
+    DB_FILE, CONTEXT_MSG_COUNT, MAX_SIMILAR_EXAMPLES,
+    SIMILARITY_THRESHOLD
+)
     except ImportError:
         # Fallback to safe defaults
         import os
@@ -349,18 +349,18 @@ class ConversationDB:
             
             # Initialize the database structure
             self._setup_database()
-            self._create_tables()
-            self._initialize_defaults()
-            self._prepare_statements()
-            
-            # Create settings table if it doesn't exist
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )
-            """)
-            self.conn.commit()
+        self._create_tables()
+        self._initialize_defaults()
+        self._prepare_statements()
+        
+        # Create settings table if it doesn't exist
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        self.conn.commit()
             logger.info("Database initialization completed successfully")
             
         except Exception as e:
@@ -504,8 +504,8 @@ class ConversationDB:
                     uri_path,
                     uri=True if self.db_file != ":memory:" else False,
                     timeout=20.0,  # Even longer timeout for slow mobile storage
-                    isolation_level=None  # Autocommit mode
-                )
+            isolation_level=None  # Autocommit mode
+        )
                 conn.row_factory = sqlite3.Row
                 
                 # Enable foreign keys
@@ -1207,7 +1207,7 @@ class ConversationDB:
                 except Exception as close_error:
                     logger.warning(f"Error closing connection for thread {thread_id}: {close_error}")
             logger.debug("All database connections closed")
-        except Exception as e:
+                except Exception as e:
             logger.error(f"Error in close(): {e}")
 
     def find_similar_exchange(self, query: str, threshold: float = None) -> List[Tuple[str, str, float]]:

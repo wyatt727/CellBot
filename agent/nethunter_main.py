@@ -57,6 +57,8 @@ def parse_arguments():
                         help='CPU thread count for ollama')
     parser.add_argument('--gpu-layers', type=int, default=None,
                         help='GPU layer count for ollama')
+    parser.add_argument('--no-db', action='store_true',
+                        help='Disable database usage (use in-memory storage)')
                         
     return parser.parse_args()
 
