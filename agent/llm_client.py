@@ -189,18 +189,39 @@ async def get_llm_response_async(
     # This code should never be reached due to returns or exceptions above
     raise Exception("Unexpected code path in get_llm_response_async")
 
-async def stream_llm_response(context: list, model: str, session: aiohttp.ClientSession):
+async def stream_llm_response(context: list, model: str, session: Optional[aiohttp.ClientSession] = None):
     """
     An asynchronous generator that yields response chunks as they are received from the LLM API.
     This allows the caller to update the UI incrementally.
+    
+    Args:
+        context: List of message dictionaries
+        model: Model name to use
+        session: Optional aiohttp.ClientSession. If None, a new session is created and properly closed.
     """
-    payload = {
-        "model": model,
-        "messages": context,
-        "stream": True
-    }
-    url = f"{LLM_API_BASE}/api/chat"
-    async with session.post(url, json=payload) as resp:
-        resp.raise_for_status()
-        async for chunk in resp.content.iter_any():
-            yield chunk.decode()
+    own_session = False
+    
+    # Create a session if one wasn't provided
+    if session is None:
+        own_session = True
+        session = aiohttp.ClientSession()
+        logger.info("Created new session for streaming")
+    
+    try:
+        payload = {
+            "model": model,
+            "messages": context,
+            "stream": True
+        }
+        url = f"{LLM_API_BASE}/api/chat"
+        
+        async with session.post(url, json=payload) as resp:
+            resp.raise_for_status()
+            async for chunk in resp.content.iter_any():
+                yield chunk.decode()
+                
+    finally:
+        # Close the session if we created it
+        if own_session and session and not session.closed:
+            await session.close()
+            logger.info("Closed streaming session")

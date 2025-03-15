@@ -46,7 +46,7 @@ DEFAULT_NUM_PREDICT = 500  # Limit token generation for mobile battery savings
 # Network settings
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_FACTOR = 1.5
-NETWORK_TIMEOUT = 30  # seconds
+NETWORK_TIMEOUT = 700  # seconds
 
 # Context settings
 CONTEXT_MSG_COUNT = 5

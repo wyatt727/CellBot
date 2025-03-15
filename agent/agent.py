@@ -182,6 +182,15 @@ class MinimalAIAgent:
         # Store the timeout value 
         self.default_timeout = timeout
         
+        # Try to use session manager if available
+        try:
+            from .session_manager import managed_session
+            self._has_session_manager = True
+            self.logger.info("Using session manager for aiohttp sessions")
+        except ImportError:
+            self._has_session_manager = False
+            self.logger.info("Session manager not available, using direct session creation")
+        
         # Setup aiohttp session with proper timeout
         if timeout == 0:
             # 0 means no timeout
@@ -199,6 +208,11 @@ class MinimalAIAgent:
         global DEBUG_MODE, SAVE_CODE_BLOCKS
         DEBUG_MODE = debug_mode
         SAVE_CODE_BLOCKS = save_code
+        
+        # Track all created sessions that need to be closed
+        self._sessions_to_cleanup = []
+        if hasattr(self, 'aiohttp_session'):
+            self._sessions_to_cleanup.append(self.aiohttp_session)
         
         # Optimized semaphores
         self.llm_semaphore = asyncio.Semaphore(max_llm_calls)
@@ -794,11 +808,18 @@ class MinimalAIAgent:
             )
             logger.info("Created new aiohttp session with no timeout")
             
+            # Add to tracked sessions
+            if hasattr(self, '_sessions_to_cleanup'):
+                self._sessions_to_cleanup.append(self.aiohttp_session)
+            
             # Close the old session asynchronously
             if old_session:
                 try:
                     await old_session.close()
                     logger.info("Closed old aiohttp session")
+                    # Remove from tracked sessions if present
+                    if hasattr(self, '_sessions_to_cleanup') and old_session in self._sessions_to_cleanup:
+                        self._sessions_to_cleanup.remove(old_session)
                 except Exception as e:
                     logger.warning(f"Error closing old session: {e}")
             
@@ -1540,11 +1561,18 @@ Examples:
                 )
                 logger.info("Created new aiohttp session with no timeout")
                 
+                # Add to tracked sessions
+                if hasattr(self, '_sessions_to_cleanup'):
+                    self._sessions_to_cleanup.append(self.aiohttp_session)
+                
                 # Close the old session asynchronously
                 if old_session:
                     try:
                         await old_session.close()
                         logger.info("Closed old aiohttp session")
+                        # Remove from tracked sessions if present
+                        if hasattr(self, '_sessions_to_cleanup') and old_session in self._sessions_to_cleanup:
+                            self._sessions_to_cleanup.remove(old_session)
                     except Exception as e:
                         logger.warning(f"Error closing old session: {e}")
                         
@@ -1555,11 +1583,18 @@ Examples:
                 )
                 logger.info(f"Created new aiohttp session with timeout: {timeout_int}s")
                 
+                # Add to tracked sessions
+                if hasattr(self, '_sessions_to_cleanup'):
+                    self._sessions_to_cleanup.append(self.aiohttp_session)
+                
                 # Close the old session asynchronously
                 if old_session:
                     try:
                         await old_session.close()
                         logger.info("Closed old aiohttp session")
+                        # Remove from tracked sessions if present
+                        if hasattr(self, '_sessions_to_cleanup') and old_session in self._sessions_to_cleanup:
+                            self._sessions_to_cleanup.remove(old_session)
                     except Exception as e:
                         logger.warning(f"Error closing old session: {e}")
                         
@@ -1717,18 +1752,36 @@ Examples:
     async def cleanup(self):
         """Clean up resources before exiting."""
         try:
-            # Close aiohttp session properly
+            # Close all tracked sessions
+            if hasattr(self, '_sessions_to_cleanup') and self._sessions_to_cleanup:
+                logger.info(f"Closing {len(self._sessions_to_cleanup)} tracked sessions")
+                for session in self._sessions_to_cleanup[:]:  # Make a copy of the list to avoid modification during iteration
+                    if session and not session.closed:
+                        try:
+                            await session.close()
+                            logger.info(f"Closed tracked session {id(session)}")
+                        except Exception as e:
+                            logger.error(f"Error closing tracked session {id(session)}: {e}")
+                    # Remove the session from the list
+                    self._sessions_to_cleanup.remove(session)
+                    
+            # Close aiohttp session properly (for backward compatibility)
             if hasattr(self, 'aiohttp_session') and self.aiohttp_session:
-                try:
+                # Check if the session is not already closed
+                if not self.aiohttp_session.closed:
                     logger.info("Closing aiohttp session...")
                     await self.aiohttp_session.close()
                     logger.info("Aiohttp session closed successfully")
-                except Exception as e:
-                    logger.error(f"Error closing aiohttp session: {e}")
+                else:
+                    logger.info("Aiohttp session already closed")
             
             # Close database connection
             if hasattr(self, 'db') and self.db is not None:
-                self.db.close()
+                try:
+                    self.db.close()
+                    logger.info("Database connection closed")
+                except Exception as e:
+                    logger.error(f"Error closing database: {e}")
                 
             # Clear any temporary files
             temp_dir = tempfile.gettempdir()
@@ -1743,13 +1796,19 @@ Examples:
             # Run final garbage collection
             gc.collect()
             
-            # Log session end
-            print(f"\nSession ended. Duration: {datetime.now() - self.session_start}")
-            
-            # Clean up any background tasks
+            # Cancel any pending tasks
             for task in _BACKGROUND_TASKS:
                 if not task.done():
                     task.cancel()
                     
+            # Explicitly wait for any pending tasks to be cancelled
+            if _BACKGROUND_TASKS:
+                await asyncio.gather(*_BACKGROUND_TASKS, return_exceptions=True)
+                
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}", exc_info=True)
+        finally:
+            # Log session stats
+            end_time = datetime.now()
+            duration = end_time - self.session_start
+            logger.info(f"Session ended. Duration: {duration.total_seconds():.1f}s")
