@@ -7,7 +7,7 @@ SYSTEM_PROMPT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".
 # LLM API configuration
 OLLAMA_API_BASE = "http://127.0.0.1:11434"  # Base URL for Ollama API
 
-LLM_MODEL = "deepseek-coder-v2"
+LLM_MODEL = "llama3:8b"  # Changed from deepseek-coder-v2 to a lighter, faster model
 
 # Execution parameters
 MAX_FIX_ATTEMPTS = 2
@@ -23,7 +23,7 @@ SIMILARITY_THRESHOLD = 0.94  # Threshold for using cached response directly
 DEBUG_MODE = False  # Set to True to show detailed timing information
 MAX_CONCURRENT_LLM_CALLS = 3
 MAX_CONCURRENT_CODE_EXECUTIONS = 3
-RESPONSE_TIMEOUT = 120
+RESPONSE_TIMEOUT = 60  # Reduced from 120 to 60 seconds for faster responses
 
 # Directory for generated code files
 GENERATED_CODE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "generated_code")

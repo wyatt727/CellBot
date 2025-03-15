@@ -20,7 +20,18 @@ GENERATED_CODE_DIR = os.path.join(NETHUNTER_BASE_DIR, "generated_code")
 
 # API configuration
 API_BASE_URL = os.environ.get("CELLBOT_API_URL", "http://localhost:11434/api")
-DEFAULT_MODEL = os.environ.get("CELLBOT_MODEL", "mistral:7b")
+# Select a smaller default model for mobile devices
+if platform.system() == "Linux" and (
+    "android" in platform.platform().lower() or
+    os.path.exists("/system/build.prop") or
+    os.path.exists("/data/data/com.termux")
+):
+    # For Android/NetHunter, use a smaller model by default
+    DEFAULT_MODEL = os.environ.get("CELLBOT_MODEL", "llama3:8b")
+    logger.info("Mobile device detected, using smaller default model: llama3:8b")
+else:
+    # For desktop/server systems, use the standard model
+    DEFAULT_MODEL = os.environ.get("CELLBOT_MODEL", "mistral:7b")
 
 # Performance settings
 DEFAULT_THREADS = 2  # Conservative default for mobile

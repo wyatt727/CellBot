@@ -1,5 +1,5 @@
 ---
-description: Base Guidelines for Sonnet-3.7 + Cursor Agent
+description: Helpful for every request
 globs: *,**/*
 alwaysApply: false
 ---

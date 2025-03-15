@@ -12,8 +12,8 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Tuple, Dict
 # Remove MockConversationDB import
 from .system_prompt import get_system_prompt
-from .llm_client import get_llm_response_async
-from .code_executor import execute_code_async
+from .llm_client import get_llm_response_async, LLM_API_BASE
+from .code_executor import execute_code_async, extract_code_blocks
 from .config import (
     LLM_MODEL, MAX_CONCURRENT_LLM_CALLS, 
     MAX_CONCURRENT_CODE_EXECUTIONS, RESPONSE_TIMEOUT,
@@ -276,8 +276,13 @@ class MinimalAIAgent:
             "requests_count": 0,
             "tokens_per_second": 0,
             "cache_hits": 0,
-            "timeouts": 0
+            "timeouts": 0,
+            "success_count": 0
         }
+        
+        # Track last garbage collection time for memory optimization
+        self.last_gc_time = datetime.now()
+        self.gc_interval = timedelta(minutes=2)  # Run GC every 2 minutes
         
         # Store default timeout for restoration after /notimeout
         self.default_timeout = timeout
@@ -290,7 +295,6 @@ class MinimalAIAgent:
             'clear': self.clear_screen,
             'stats': self.show_session_stats,
             'repeat': self.repeat_last_command,
-            'success': self.process_success_command,
             'search': lambda x: self.web_search(x) if x else "Please provide a search query",
             'web': lambda x: self.web_search(x) if x else "Please provide a search query",
             'perf': self.show_performance_metrics,
@@ -313,14 +317,13 @@ class MinimalAIAgent:
             'sysinfo': self.get_system_info,
             'copy': self.copy_to_clipboard,
             'paste': self.paste_from_clipboard,
-            'battery': self.check_battery_status
+            'battery': self.check_battery_status,
+            'timeout': self.set_timeout,
         }
         
         # Mobile optimization settings
         self.low_memory_mode = os.environ.get("CELLBOT_LOW_MEMORY", "false").lower() == "true"
         self.memory_threshold = float(os.environ.get("CELLBOT_MEMORY_THRESHOLD", "85.0"))
-        self.last_gc_time = datetime.now()
-        self.gc_interval = timedelta(minutes=5)  # Run GC every 5 minutes
         
         # Memory monitoring
         self.memory_usage_history = []
@@ -431,54 +434,50 @@ class MinimalAIAgent:
             return False
 
     async def show_help(self, args: str = ""):
-        """Show help text."""
-        help_text = f"""
-╭─ CellBot for NetHunter Help ─────────────────────────────
-
-  🔍 WEB INTEGRATION
-    /search [query]    - Search the web for information
-    /web [query]       - Alias for /search
-
-  📊 MODEL PERFORMANCE
-    /model [name]      - Change the AI model
-    /threads [num]     - Set CPU threads (default: auto)
-    /gpu [layers]      - Set GPU acceleration layers
-    /temp [value]      - Set temperature (0.0-1.0)
-    /tokens [num]      - Set max tokens to generate
-    /optimize          - Auto-optimize settings for device
-    /perf              - Show performance metrics
-    /memory            - Show memory usage statistics
-    {'   /nocache          - Disable caching for next query' if hasattr(self, '_cache') else ''}
-
-  💾 SESSION MANAGEMENT
-    /history           - Show recent conversation history
-    /save [filename]   - Save conversation to a file
-    /success [cmd]     - Mark a command as successfully executed
-    /copy [text]       - Copy text to clipboard
-    /paste             - Paste from clipboard
-
-  🔧 OPTIONS
-    /notimeout         - Disable timeout for next query
-    /timeout [seconds] - Set timeout in seconds
-
-  📱 NETHUNTER TOOLS
-    /nh [command]      - Run NetHunter command
-    /nethunter [cmd]   - Same as /nh
-    /netinfo [iface]   - Show network information
-    /sysinfo           - Show system information
-    /battery           - Check battery status
-
-  🔄 GENERAL COMMANDS
-    /repeat            - Repeat last query
-    /clear             - Clear the screen
-    /stats             - Show session statistics
-    /help              - Show this help message
-    /exit or /quit     - Exit the session
-
-╰───────────────────────────────────────────────────────────
-"""
-        print(self.command_history.wrap_text(help_text))
-        return None
+        """Show help."""
+        categories = {
+            "Basic Commands": [
+                ("/help", "Show this help message"),
+                ("/clear", "Clear the screen"),
+                ("/exit or /quit", "Exit the program"),
+                ("/stats", "Show session statistics"),
+                ("/history", "Show command history"),
+                ("/!!", "Repeat last command"),
+            ],
+            "Model Management": [
+                ("/model [name]", "Set or show the current model"),
+                ("/threads [n]", "Set number of CPU threads"),
+                ("/gpu [n]", "Set number of GPU layers"),
+                ("/temperature [value]", "Set temperature (0.0-1.0)"),
+                ("/tokens [n]", "Set max tokens to generate"),
+                ("/timeout [seconds]", "Set response timeout"),
+                ("/ollama", "Check Ollama status and restart if needed"),
+            ],
+            "Enhanced Commands": [
+                ("/search [query]", "Search the web for information"),
+                ("/s [query]", "Alias for /search"),
+                ("/metrics", "Show performance metrics"),
+                ("/nocache [prompt]", "Process prompt without using or saving to cache"),
+                ("/netinfo [iface]", "Show network information"),
+                ("/sysinfo", "Show system information"),
+                ("/battery", "Check battery status"),
+            ],
+            "Mobile Optimization": [
+                ("/optimize", "Auto-optimize settings for device"),
+                ("/nh [command]", "Run NetHunter command"),
+                ("/nethunter [cmd]", "Same as /nh"),
+                ("/battery", "Check battery status"),
+                ("/memory", "Show memory usage statistics"),
+                ("/timeout [seconds]", "Set timeout in seconds"),
+            ],
+        }
+        
+        print("\n╭─ CellBot for NetHunter Help ─────────────────────────────")
+        for category, commands in categories.items():
+            print(f"\n{category}:")
+            for cmd, desc in commands:
+                print(f"  {cmd} - {desc}")
+        print("╰──────────────────────────────────────────────────────────")
 
     async def show_command_history(self, _: str):
         """Show the command history with timestamps."""
@@ -622,8 +621,17 @@ class MinimalAIAgent:
         return context
 
     def extract_code_from_response(self, response: str):
-        """Extract code blocks from a response."""
+        """Extract code blocks from a response without filtering them.
+        
+        This method intentionally does not filter any code blocks - it simply returns all
+        code blocks found in the response. This is because:
+        1. Users expect code blocks to be executed when they appear in the response
+        2. The system prompt provides examples like 'echo "hello!"' that should be executed
+        3. Filtering creates unpredictable behavior where some commands are executed and others aren't
+        """
         from .code_executor import extract_code_blocks
+        
+        # Get code blocks using the original function and return them all without filtering
         return extract_code_blocks(response)
 
     async def process_code_block(self, language: str, code: str) -> Tuple[int, str]:
@@ -737,27 +745,46 @@ class MinimalAIAgent:
         # Return the metrics string instead of printing it
         return metrics
 
-    async def process_message(self, message: str, no_cache: bool = False) -> Tuple[str, bool]:
-        """
-        Process user message and return a response.
-        Returns: Tuple[response: str, was_cached: bool]
+    async def process_message(self, message: str, no_cache: bool = False) -> Tuple[str, bool, bool]:
+        """Process a message and return a response.
+        
+        Args:
+            message: The message to process
+            no_cache: If True, bypass the cache
+            
+        Returns:
+            Tuple of (response, was_cached, code_executed)
+            - response: The text response from the LLM
+            - was_cached: Whether the response was from the cache
+            - code_executed: Whether code blocks were executed
         """
         start_time = datetime.now()
-        phase = "initialization"
+        
+        # Clear memory more aggressively on mobile devices to prevent OOM issues
+        if self._is_mobile_device():
+            # Force garbage collection before processing
+            gc.collect()
+            
+            # Check memory usage and optimize if needed
+            await self.check_memory_usage(display_info=False)
         
         # Store for command completion context
         self.current_input = message
         
+        # Initialize similarity variable to avoid reference errors
+        similarity = 0.0
+        similar_exchanges = []
+        
         # Turbo search mode with ?! prefix (ultra-fast search)
         if message.startswith('?!'):
             search_query = message[2:].strip()
-            return await self._turbo_search(search_query), False
+            return await self._turbo_search(search_query), False, False
         
         # Standard quick search with ? prefix
         elif message.startswith('?'):
             search_query = message[1:].strip()
             search_results = await self.web_search(search_query)
-            return search_results, False
+            return search_results, False, False
         
         # Check for /notimeout flag
         use_extended_timeout = False
@@ -775,29 +802,30 @@ class MinimalAIAgent:
         
         # Extract command if message starts with /
         command, args = self._extract_command_and_args(message)
+        
         if command:
             # Handle direct command aliases (functions that return values)
             if command in ['search', 'web']:
                 search_results = await self.web_search(args)
-                return search_results, False
+                return search_results, False, False
             
             # Handle built-in commands
             if command == "history":
                 history_response = await self._handle_history_command(command, args)
                 if history_response:
-                    return history_response, False
+                    return history_response, False, False
             
             # Handle model switching
             if command == "model":
                 if not args:
-                    return f"Current model: {self.model}\nUse /model [model_name] to switch models", False
+                    return f"Current model: {self.model}\nUse /model [model_name] to switch models", False, False
                 self.model = args
-                return f"Model switched to {self.model}", False
+                return f"Model switched to {self.model}", False, False
             
             # Handle performance command
             if command == "perf":
                 await self.show_performance_metrics(args)
-                return "Performance metrics displayed above", False
+                return "Performance metrics displayed above", False, False
         
         try:
             if not no_cache:
@@ -831,11 +859,13 @@ class MinimalAIAgent:
                         blocks = self.extract_code_from_response(cached_response)
                         if blocks:
                             results = await self._process_code_blocks_parallel(blocks)
-                            # Return an empty string to avoid duplicating the code output
-                            return "", True
+                            # Return the full response with was_cached=True and code_executed=True
+                            return cached_response, True, True
                         
-                        return cached_response, True
+                        # Return the cached response with code_executed=False
+                        return cached_response, True, False
             
+            # Begin LLM processing phase
             phase = "llm_processing"
             print("\n╭─ Generating Response ───────────────────────────────────")
             print("│  ⟳ Processing request...")
@@ -862,22 +892,26 @@ class MinimalAIAgent:
                 print(f"│  ⏱  Context: {context_time:.2f}s")
             
             llm_start = datetime.now()
+            # We use the LLM semaphore here to limit concurrent API calls
             try:
                 async with self.llm_semaphore:
                     response = await get_llm_response_async(
                         context, 
                         self.model, 
                         self.aiohttp_session,
-                        num_thread=self.ollama_config["num_thread"],
-                        num_gpu=self.ollama_config["num_gpu"],
-                        temperature=self.ollama_config.get("temperature"),
-                        num_predict=self.ollama_config.get("num_predict"),
-                        timeout=self.ollama_config["timeout"]
+                        temperature=self.ollama_config.get("temperature", 0.7),
+                        num_thread=self.ollama_config.get("num_thread", 4),
+                        num_gpu=self.ollama_config.get("num_gpu", 0),
+                        num_predict=self.ollama_config.get("num_predict", 1024),
+                        timeout=self.ollama_config.get("timeout", 60)
                     )
-                llm_time = (datetime.now() - llm_start).total_seconds()
                 
-                # Update performance metrics
+                # Add completion to metrics
                 self.perf_metrics["requests_count"] += 1
+                self.perf_metrics["success_count"] += 1
+                
+                # Calculate timing data
+                llm_time = (datetime.now() - llm_start).total_seconds()
                 self.perf_metrics["total_response_time"] += llm_time
                 self.perf_metrics["total_tokens"] += llm_time
                 self.perf_metrics["avg_response_time"] = (
@@ -913,8 +947,15 @@ class MinimalAIAgent:
             
             blocks = self.extract_code_from_response(response)
             
-            if not self.in_comparison_mode and not no_cache and blocks:
-                self.successful_exchanges.append((message, response, similarity))
+            if not self.in_comparison_mode and not no_cache:
+                # Store successful exchange with appropriate similarity
+                if not similar_exchanges:
+                    # No similar exchange found, use 0.0 similarity
+                    self.successful_exchanges.append((message, response, 0.0))
+                else:
+                    # Use the calculated similarity 
+                    self.successful_exchanges.append((message, response, similarity))
+                
                 if DEBUG_MODE:
                     print("│  ✓ Response cached")
             
@@ -926,10 +967,12 @@ class MinimalAIAgent:
             # Execute code blocks immediately for non-cached responses
             if blocks:
                 await self._process_code_blocks_parallel(blocks)
-                # Return an empty string to avoid duplicating code blocks
-                return "", False
+                # Return the full text response after executing code blocks
+                # We'll mark it as code_executed=True so process_query knows code was already shown
+                return response, False, True  # Returns response, was_cached, code_executed
             
-            return response, False
+            # Return the response with code_executed=False to indicate no code blocks were executed
+            return response, False, False  # Returns response, was_cached, code_executed
 
         except Exception as e:
             total_time = (datetime.now() - start_time).total_seconds()
@@ -939,7 +982,7 @@ class MinimalAIAgent:
                 print(f"│  ⏱  Time: {total_time:.1f}s")
             print("╰──────────────────────────────────────────────────────")
             logger.error(f"Error in {phase}: {e}")
-            return f"❌ Error in {phase}: {str(e)}", False
+            return f"❌ Error in {phase}: {str(e)}", False, False
 
         finally:
             # Restore original timeout if it was changed
@@ -1227,86 +1270,89 @@ Examples:
 
     async def set_model(self, model_name: str) -> str:
         """Set the LLM model to use."""
-        if not model_name.strip():
-            return f"Current model: {self.model}"
-        
-        # Trim whitespace and validate
-        new_model = model_name.strip()
-        
-        # Store the original model in case we need to revert
-        original_model = self.model
-        
         try:
-            # Set the new model
-            self.model = new_model
-            
-            # Build a minimal test context
-            test_context = [{"role": "user", "content": "test"}]
-            
-            # Try a minimal request to validate the model
-            try:
-                await get_llm_response_async(
-                    test_context,
-                    self.model,
-                    self.aiohttp_session,
-                    num_thread=self.ollama_config["num_thread"],
-                    num_gpu=self.ollama_config["num_gpu"],
-                    temperature=self.ollama_config.get("temperature"),
-                    num_predict=self.ollama_config.get("num_predict"),
-                    timeout=5  # Short timeout for testing
-                )
-                
-                # If we get here, the model is valid
-                return f"Model successfully switched to {self.model}"
-            except Exception as request_error:
-                error_message = str(request_error).lower()
-                
-                # If the error contains "model not found", try with :latest suffix
-                if "model not found" in error_message and ":" not in new_model:
-                    try:
-                        model_with_latest = f"{new_model}:latest"
-                        self.model = model_with_latest
+            models = await self._get_available_models()
+            model_name = model_name.strip()
+
+            # If model doesn't exist, offer to pull it
+            if model_name not in models:
+                result = f"Model '{model_name}' is not currently available locally.\n"
+                try:
+                    print(f"Attempting to pull model '{model_name}'...")
+                    # Try to pull the model using subprocess
+                    proc = await asyncio.create_subprocess_exec(
+                        "ollama", "pull", model_name,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    
+                    stdout, stderr = await proc.communicate()
+                    
+                    if proc.returncode == 0:
+                        self.model = model_name
+                        self.ollama_config["model"] = model_name
+                        return f"Successfully pulled and switched to model '{model_name}'."
+                    else:
+                        error = stderr.decode() if stderr else "Unknown error"
+                        return f"Failed to pull model '{model_name}': {error}\n\nAvailable models: {', '.join(models)}"
                         
-                        await get_llm_response_async(
-                            test_context,
-                            self.model,
-                            self.aiohttp_session,
-                            num_thread=self.ollama_config["num_thread"],
-                            num_gpu=self.ollama_config["num_gpu"],
-                            temperature=self.ollama_config.get("temperature"),
-                            num_predict=self.ollama_config.get("num_predict"),
-                            timeout=5  # Short timeout for testing
-                        )
-                        
-                        # If we get here, the model with :latest suffix is valid
-                        return f"Model successfully switched to {self.model}"
-                    except Exception as latest_error:
-                        # Both original name and with :latest suffix failed
-                        self.model = original_model
-                        raise RuntimeError(f"Model '{new_model}' and '{model_with_latest}' not found.") from latest_error
-                else:
-                    # Other error, not related to model not found
-                    raise request_error
+                except Exception as e:
+                    return f"Error pulling model '{model_name}': {str(e)}\n\nAvailable models: {', '.join(models)}"
+            
+            # Change the model
+            self.model = model_name
+            self.ollama_config["model"] = model_name
+            return f"Switched to model: {model_name}"
             
         except Exception as e:
-            # Revert to the original model
-            self.model = original_model
-            error_message = str(e)
+            return f"Error changing model: {str(e)}"
             
-            if "model not found" in error_message.lower():
-                # Get available models
-                try:
-                    available_models = await self._get_available_models()
-                    models_text = ", ".join(available_models[:10])
-                    if len(available_models) > 10:
-                        models_text += f" and {len(available_models) - 10} more"
-                    
-                    return f"Error: Model '{new_model}' not found. Available models: {models_text}. Current model is still {self.model}."
-                except:
-                    return f"Error: Model '{new_model}' not found. Current model is still {self.model}."
-            else:
-                return f"Error switching model: {error_message}. Current model is still {self.model}."
+    async def check_ollama_status(self, _: str = "") -> str:
+        """Check if Ollama is running properly and attempt to restart if needed."""
+        try:
+            # Import LLM_API_BASE from llm_client
+            from .llm_client import LLM_API_BASE
+            
+            # Try to connect to Ollama's API
+            url = f"{LLM_API_BASE}/api/tags"
+            async with self.aiohttp_session.get(url, timeout=5) as response:
+                if response.status == 200:
+                    models = await self._get_available_models()
+                    return f"✅ Ollama is running correctly.\n\nAvailable models: {', '.join(models)}"
+                else:
+                    error_text = await response.text()
+                    return f"⚠️ Ollama is responding but with errors: {error_text}"
+        except Exception as e:
+            # Ollama might not be running
+            from .llm_client import LLM_API_BASE
+            url = f"{LLM_API_BASE}/api/tags"
+            result = f"❌ Ollama connection error: {str(e)}\n\nAttempting to start Ollama..."
+            
+            try:
+                # Try to start Ollama in the background
+                proc = await asyncio.create_subprocess_exec(
+                    "ollama", "serve",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True  # Detach process from Python
+                )
                 
+                # Wait a bit for Ollama to start
+                await asyncio.sleep(3)
+                
+                # Check if it's now running
+                try:
+                    async with self.aiohttp_session.get(url, timeout=5) as response:
+                        if response.status == 200:
+                            return f"{result}\n\n✅ Successfully started Ollama!"
+                except Exception as new_e:
+                    return f"{result}\n\n❌ Failed to connect after starting: {str(new_e)}"
+                
+                return f"{result}\n\n⚠️ Started Ollama but status is uncertain."
+                
+            except Exception as start_e:
+                return f"{result}\n\n❌ Failed to start Ollama: {str(start_e)}\n\nPlease manually start Ollama with 'ollama serve' in a terminal."
+
     async def _get_available_models(self) -> List[str]:
         """Get a list of available Ollama models."""
         try:
@@ -1425,34 +1471,74 @@ Examples:
             return f"Error: '{temperature}' is not a valid number. Current temperature: {self.ollama_config.get('temperature', 0.7)}"
 
     async def set_num_predict(self, num_predict: str) -> str:
-        """Set the maximum number of tokens to predict (response length limit).
-        
-        Args:
-            num_predict: String containing the maximum number of tokens
-                         If empty, returns the current num_predict value
-        
-        Returns:
-            A confirmation message
-        """
-        # If no argument, return current setting
-        if not num_predict.strip():
-            return f"Current max tokens (num_predict): {self.ollama_config.get('num_predict', 1024)}"
-        
-        # Try to parse the num_predict value
+        """Set the maximum number of tokens to predict."""
         try:
-            new_num_predict = int(num_predict.strip())
-            if new_num_predict <= 0:
-                return f"Error: Max tokens must be positive. Current value: {self.ollama_config.get('num_predict', 1024)}"
+            # Validate input
+            if not num_predict.strip():
+                return f"Current max tokens: {self.ollama_config.get('num_predict', 1024)}"
                 
-            # Set the new num_predict value
-            self.ollama_config['num_predict'] = new_num_predict
-            
-            # Save to settings DB for persistence
-            self.settings["ollama_num_predict"] = str(new_num_predict)
-            
-            return f"Max tokens (num_predict) set to {new_num_predict}"
+            num_predict_int = int(num_predict.strip())
+            if num_predict_int < 10:
+                return "Error: Minimum token count is 10"
+            if num_predict_int > 4096:
+                return "Error: Maximum token count is 4096"
+                
+            # Set the value
+            self.ollama_config["num_predict"] = num_predict_int
+            return f"Maximum tokens to generate set to {num_predict_int}"
         except ValueError:
-            return f"Error: '{num_predict}' is not a valid number. Current value: {self.ollama_config.get('num_predict', 1024)}"
+            return f"Error: Invalid number format. Please provide an integer between 10 and 4096."
+            
+    async def set_timeout(self, timeout: str) -> str:
+        """Set the response timeout in seconds."""
+        try:
+            # Validate input
+            if not timeout.strip():
+                return f"Current timeout: {self.ollama_config.get('timeout', 60)} seconds"
+                
+            timeout_int = int(timeout.strip())
+            if timeout_int < 5 and timeout_int != 0:
+                return "Error: Minimum timeout is 5 seconds (or 0 for no timeout)"
+            if timeout_int > 600:
+                return "Warning: Very long timeout (>10 minutes) might lead to network issues"
+                
+            # Set the value
+            self.ollama_config["timeout"] = timeout_int
+            
+            # Also update aiohttp session timeout
+            if timeout_int == 0:
+                # 0 means no timeout
+                self.aiohttp_session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=None)
+                )
+                return "Timeout disabled (will wait indefinitely for responses)"
+            else:
+                self.aiohttp_session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=timeout_int)
+                )
+                return f"Response timeout set to {timeout_int} seconds"
+        except ValueError:
+            return f"Error: Invalid number format. Please provide an integer."
+            
+    async def process_nocache(self, prompt: str) -> str:
+        """Process a prompt without using or saving to the cache."""
+        if not prompt.strip():
+            return "Please provide a prompt after /nocache"
+            
+        print(f"Processing without cache: {prompt}")
+        
+        try:
+            # Process the query with no_cache=True to bypass cache
+            response, _, code_executed = await self.process_message(prompt, no_cache=True)
+            
+            # Add to conversation history
+            self.add_message("user", prompt)
+            self.add_message("assistant", response)
+            
+            # Return the response
+            return response
+        except Exception as e:
+            return f"Error: {str(e)}"
 
     def _setup_autocomplete(self):
         """Set up command autocompletion for the agent."""
@@ -1464,7 +1550,7 @@ Examples:
             "/search", "/web", "/history", "/model", "/perf", "/notimeout", 
             "/help", "/exit", "/quit", "/bye", "/threads", "/gpu", 
             "/temp", "/temperature", "/tokens", "/num_predict",
-            "/optimize", "/auto", "/battery"
+            "/optimize", "/auto", "/battery", "/timeout"
         ]
         
         self.history_commands = [
@@ -1524,48 +1610,94 @@ Examples:
         return options[state] if state < len(options) else None
 
     async def run(self):
-        """Run the agent in a loop."""
-        print(self.get_welcome_banner())
-        
-        # Mobile device memory check on startup
-        await self.check_memory_usage(True)  # Initial memory check with display
-        
-        while True:
-            try:
-                # Periodic memory check and garbage collection
-                if datetime.now() - self.last_gc_time > self.gc_interval:
-                    await self.check_memory_usage()
-                    self.last_gc_time = datetime.now()
+        """Run the agent in a loop, processing user input."""
+        try:
+            # Define command handlers
+            self.command_handlers = {
+                # Basic commands
+                "help": self.show_help,
+                "exit": None,  # Special case handled in the loop
+                "quit": None,  # Special case handled in the loop
+                "clear": self.clear_screen,
+                "stats": self.show_session_stats,
+                "history": self.show_command_history,
+                "!!": self.repeat_last_command,
                 
-                user_query = await self.get_user_input()
-                if user_query.lower() in ["exit", "quit", "bye"]:
-                    print("Exiting...")
-                    await self.clean_up()
-                    return
+                # Model management
+                "model": self.set_model,
+                "threads": self.set_threads,
+                "gpu": self.set_gpu_layers,
+                "temperature": self.set_temperature,
+                "tokens": self.set_num_predict,
+                "ollama": self.check_ollama_status,  # New command for Ollama status
+                "timeout": self.set_timeout,
                 
-                if not user_query.strip():
-                    continue
-
-                # Process commands that start with /
-                if user_query.startswith("/"):
-                    await self.process_command(user_query)
-                    continue
+                # Enhanced commands
+                "search": self.web_search,
+                "s": self.web_search,  # Alias for search
+                "metrics": self.show_performance_metrics,
+                "nocache": self.process_nocache,  # New command for nocache
                 
-                # Normal query processing
-                await self.process_query(user_query)
-                
-            except KeyboardInterrupt:
-                print("\nInterrupted. Type /exit to quit or press Ctrl+C again to force exit.")
+                # NetHunter/Android commands
+                "netinfo": self.get_network_info,
+                "sysinfo": self.get_system_info,
+                "battery": self.check_battery_status,
+                "optimize": self.optimize_for_battery,
+                "nh": self.execute_nethunter_command,
+                "nethunter": self.execute_nethunter_command,
+                "memory": self.show_memory_stats,
+            }
+            
+            # Show help on first run
+            await self.show_help()
+            
+            # Setup autocomplete
+            self._setup_autocomplete()
+            
+            # Mobile device memory check on startup
+            await self.check_memory_usage(True)  # Initial memory check with display
+            
+            while True:
                 try:
-                    await asyncio.sleep(1)
+                    # Periodic memory check and garbage collection
+                    if datetime.now() - self.last_gc_time > self.gc_interval:
+                        await self.check_memory_usage()
+                        self.last_gc_time = datetime.now()
+                    
+                    user_query = await self.get_user_input()
+                    if user_query.lower() in ["exit", "quit", "bye"]:
+                        print("Exiting...")
+                        await self.clean_up()
+                        return
+                    
+                    if not user_query.strip():
+                        continue
+
+                    # Process commands that start with /
+                    if user_query.startswith("/"):
+                        await self.process_command(user_query)
+                        continue
+                    
+                    # Normal query processing
+                    await self.process_query(user_query)
+                    
                 except KeyboardInterrupt:
-                    print("\nForce exiting...")
-                    await self.clean_up()
-                    return
-            except Exception as e:
-                self.logger.error(f"Error in main loop: {e}", exc_info=True)
-                print(f"\nAn error occurred: {e}")
-                print("Please try again or type /exit to quit.")
+                    print("\nInterrupted. Type /exit to quit or press Ctrl+C again to force exit.")
+                    try:
+                        await asyncio.sleep(1)
+                    except KeyboardInterrupt:
+                        print("\nForce exiting...")
+                        await self.clean_up()
+                        return
+                except Exception as e:
+                    self.logger.error(f"Error in main loop: {e}", exc_info=True)
+                    print(f"\nAn error occurred: {e}")
+                    print("Please try again or type /exit to quit.")
+        
+        except Exception as e:
+            self.logger.error(f"Error in main loop: {e}", exc_info=True)
+            print(f"\nAn error occurred: {e}")
+            print("Please try again or type /exit to quit.")
     
     async def clean_up(self):
         """Clean up resources before exiting."""
@@ -2226,40 +2358,26 @@ Examples:
             return ""
 
     async def process_command(self, command: str):
-        """Process a command that starts with /."""
-        if not command.startswith('/'):
-            return
-            
-        # Extract command and arguments
-        parts = command.split(maxsplit=1)
-        cmd = parts[0][1:]  # Remove the leading '/'
+        """Process a command (prefixed with /)."""
+        # Strip the leading /
+        if command.startswith("/"):
+            command = command[1:]
+        
+        # Extract the command and arguments
+        parts = command.split(" ", 1)
+        cmd = parts[0].lower()
         args = parts[1] if len(parts) > 1 else ""
         
-        # Check if it's a known command alias
-        if cmd in self.command_aliases:
-            handler = self.command_aliases[cmd]
-            
-            # If it's a callable, call it with args
-            if callable(handler):
+        # Check if we have a handler for this command
+        if cmd in self.command_handlers:
+            handler = self.command_handlers[cmd]
+            if handler:  # Some commands like 'exit' have None handler
                 try:
-                    # Check if it's a coroutine function
-                    if asyncio.iscoroutinefunction(handler):
-                        result = await handler(args)
-                    else:
-                        result = handler(args)
-                        
-                    # If the result is "exit", exit the program
-                    if result == "exit":
-                        print("Exiting...")
-                        await self.clean_up()
-                        sys.exit(0)
-                        
-                    # If there's a result, print it
+                    result = await handler(args)
                     if result:
                         print(result)
                 except Exception as e:
-                    self.logger.error(f"Error executing command '{cmd}': {e}")
-                    print(f"❌ Error executing command: {e}")
+                    print(f"Error processing command: {e}")
             else:
                 print(f"Command handler for '{cmd}' is not callable.")
         else:
@@ -2273,16 +2391,24 @@ Examples:
             
         try:
             # Process the query
-            response, was_cached = await self.process_message(query)
+            response, was_cached, code_executed = await self.process_message(query)
+            
+            # Add to conversation history regardless of response
+            self.add_message("user", query)
+            self.add_message("assistant", response)
             
             # If there's a response, print it
             if response:
-                # Add to conversation history
-                self.add_message("user", query)
-                self.add_message("assistant", response)
-                
-                # Print the response
-                print(f"\n{response}")
+                # For responses where code blocks were executed, we'll split the response
+                # to extract any text outside the code blocks
+                if code_executed:
+                    # Extract all text before, after, and between code blocks
+                    non_code_text = self._extract_non_code_text(response)
+                    if non_code_text.strip():
+                        print(f"\n{non_code_text}")
+                else:
+                    # For responses with no code blocks, print the full response
+                    print(f"\n{response}")
                 
         except asyncio.TimeoutError:
             print("\n⚠️  Response timed out. You can try:")
@@ -2297,6 +2423,25 @@ Examples:
             
         # Periodically check memory usage
         await self.check_memory_usage()
+
+    def _extract_non_code_text(self, response: str) -> str:
+        """
+        Extract text outside of code blocks in a response.
+        
+        Args:
+            response: The full LLM response
+            
+        Returns:
+            String containing only the text parts of the response
+        """
+        # Replace code blocks with a special marker
+        no_code_response = re.sub(r'```.*?```', '', response, flags=re.DOTALL)
+        
+        # Clean up any leftover markers and format
+        no_code_response = re.sub(r'\n\s*\n\s*\n', '\n\n', no_code_response)
+        no_code_response = no_code_response.strip()
+        
+        return no_code_response
 
     async def cleanup(self):
         """Clean up resources."""

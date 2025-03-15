@@ -51,7 +51,7 @@ async def get_llm_response_async(
     if session is None:
         own_session = True
         session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=timeout if timeout else 120)
+            timeout=aiohttp.ClientTimeout(total=timeout if timeout else 60)  # Default to 60s
         )
     
     try:
@@ -68,9 +68,14 @@ async def get_llm_response_async(
             
         # For mobile, add default options only if not already set
         if "temperature" not in options:
-            options["temperature"] = 0.7  # Default: lower temp = more predictable responses
+            options["temperature"] = 0.5  # Lower temp = more predictable responses
         if "num_predict" not in options:
-            options["num_predict"] = 1024  # Default: limit response length to save resources
+            options["num_predict"] = 768  # Limit response length to save resources
+        if "num_thread" not in options and not num_thread:
+            # Try to detect cores and use a reasonable default
+            import multiprocessing
+            cores = multiprocessing.cpu_count()
+            options["num_thread"] = min(4, max(2, cores - 1))  # Use fewer threads for better performance
             
         request_body = {
             "model": model,
@@ -88,7 +93,7 @@ async def get_llm_response_async(
                 async with session.post(
                     f"{LLM_API_BASE}/api/chat",
                     json=request_body,
-                    timeout=aiohttp.ClientTimeout(total=timeout if timeout else 120)
+                    timeout=aiohttp.ClientTimeout(total=timeout if timeout else 60)  # Use 60 seconds as default
                 ) as response:
                     if response.status != 200:
                         error_text = await response.text()
@@ -114,6 +119,20 @@ async def get_llm_response_async(
                                 await asyncio.sleep(wait_time)
                                 continue
                                 
+                        # Handle broken pipe errors (common on mobile devices with limited resources)
+                        if response.status == 500 and "broken pipe" in error_message.lower():
+                            logger.error(f"Broken pipe error detected, likely due to resource constraints")
+                            # Provide more comprehensive error guidance
+                            raise Exception(f"LLM API error: {error_message}\n\nThis error can occur for several reasons:\n1. Resource constraints - the model may be using too much memory\n2. Network connectivity issues\n3. Ollama server instability\n\nTry these fixes:\n- Use '/model llama3:8b' to switch to a smaller model\n- Restart Ollama with 'ollama serve' in a separate terminal\n- Use shorter prompts or break down complex questions\n- Close other resource-intensive apps")
+                        
+                        # Handle general Ollama server issues
+                        if response.status == 500 or "ollama" in error_message.lower():
+                            if attempt < max_retries - 1:
+                                wait_time = retry_delay * (2 ** attempt)
+                                logger.warning(f"Ollama server error. Attempting recovery in {wait_time}s...")
+                                await asyncio.sleep(wait_time)
+                                continue
+                        
                         raise Exception(f"LLM API error: {error_message}")
                     
                     try:
