@@ -325,6 +325,19 @@ class MinimalAIAgent:
         # Memory monitoring
         self.memory_usage_history = []
         self.max_history_entries = 10  # Keep last 10 entries
+        
+    def add_message(self, role: str, content: str):
+        """Add a message to the conversation history."""
+        self.conversation.append({"role": role, "content": content})
+        
+        # Limit conversation length to prevent context overflow
+        max_conversation_length = 20  # Adjust as needed
+        if len(self.conversation) > max_conversation_length:
+            # Remove oldest messages but keep the system message if it exists
+            if self.conversation and self.conversation[0]["role"] == "system":
+                self.conversation = [self.conversation[0]] + self.conversation[-(max_conversation_length-1):]
+            else:
+                self.conversation = self.conversation[-max_conversation_length:]
 
     def _detect_gpu_capabilities(self) -> int:
         """

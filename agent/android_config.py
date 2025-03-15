@@ -99,6 +99,15 @@ def get_device_info() -> Dict[str, Any]:
                         break
         except Exception as e:
             logger.warning(f"Failed to get RAM info: {e}")
+            
+            # macOS alternative for RAM info
+            if platform.system() == "Darwin":
+                try:
+                    result = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, check=True)
+                    # Convert bytes to MB
+                    info["ram_mb"] = int(result.stdout.strip()) // (1024 * 1024)
+                except Exception as e:
+                    logger.warning(f"Failed to get macOS RAM info: {e}")
         
         # Get CPU info
         try:
@@ -107,20 +116,24 @@ def get_device_info() -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"Failed to get CPU info: {e}")
             
+            # macOS alternative for CPU info
+            if platform.system() == "Darwin":
+                try:
+                    result = subprocess.run(["sysctl", "-n", "hw.ncpu"], capture_output=True, text=True, check=True)
+                    info["cpu_cores"] = int(result.stdout.strip())
+                except Exception as e:
+                    logger.warning(f"Failed to get macOS CPU info: {e}")
+        
         # If we couldn't get CPU cores, try another method
         if info["cpu_cores"] == 0:
             try:
-                result = subprocess.run(
-                    ["nproc"], 
-                    capture_output=True, 
-                    text=True, 
-                    check=True
-                )
+                # Try using nproc (available on many Unix systems)
+                result = subprocess.run(["nproc"], capture_output=True, text=True, check=True)
                 info["cpu_cores"] = int(result.stdout.strip())
             except Exception as e:
                 logger.warning(f"Failed to get CPU cores using nproc: {e}")
-                # Default to 2 cores if we can't determine
-                info["cpu_cores"] = 2
+                # Default to 2 cores as a fallback
+                info["cpu_cores"] = os.cpu_count() or 2
     
     except Exception as e:
         logger.warning(f"Error getting device info: {e}")
