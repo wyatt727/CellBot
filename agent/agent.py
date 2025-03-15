@@ -1279,9 +1279,12 @@ Examples:
                 result = f"Model '{model_name}' is not currently available locally.\n"
                 try:
                     print(f"Attempting to pull model '{model_name}'...")
+                    # Get absolute path to ollama if available
+                    ollama_path = os.environ.get("OLLAMA_PATH", "ollama")
+                    
                     # Try to pull the model using subprocess
                     proc = await asyncio.create_subprocess_exec(
-                        "ollama", "pull", model_name,
+                        ollama_path, "pull", model_name,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
@@ -1310,28 +1313,41 @@ Examples:
     async def check_ollama_status(self, _: str = "") -> str:
         """Check if Ollama is running properly and attempt to restart if needed."""
         try:
+            # Get absolute path to ollama if available
+            ollama_path = os.environ.get("OLLAMA_PATH", "ollama")
+            
             # Import LLM_API_BASE from llm_client
             from .llm_client import LLM_API_BASE
             
-            # Try to connect to Ollama's API
-            url = f"{LLM_API_BASE}/api/tags"
-            async with self.aiohttp_session.get(url, timeout=5) as response:
-                if response.status == 200:
-                    models = await self._get_available_models()
-                    return f"✅ Ollama is running correctly.\n\nAvailable models: {', '.join(models)}"
-                else:
-                    error_text = await response.text()
-                    return f"⚠️ Ollama is responding but with errors: {error_text}"
+            # Execute ollama list command
+            process = await asyncio.create_subprocess_exec(
+                ollama_path, "list",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await process.communicate()
+            
+            # Parse the output
+            output = stdout.decode().strip().split("\n")
+            
+            # Skip the header line and extract model names
+            if len(output) > 1:
+                models = []
+                for line in output[1:]:  # Skip header
+                    parts = line.split()
+                    if parts:
+                        models.append(parts[0])
+                return f"✅ Ollama is running correctly.\n\nAvailable models: {', '.join(models)}"
+            return "Ollama is not running or no models available."
         except Exception as e:
             # Ollama might not be running
             from .llm_client import LLM_API_BASE
-            url = f"{LLM_API_BASE}/api/tags"
             result = f"❌ Ollama connection error: {str(e)}\n\nAttempting to start Ollama..."
             
             try:
                 # Try to start Ollama in the background
                 proc = await asyncio.create_subprocess_exec(
-                    "ollama", "serve",
+                    ollama_path, "serve",
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=True  # Detach process from Python
@@ -1342,7 +1358,7 @@ Examples:
                 
                 # Check if it's now running
                 try:
-                    async with self.aiohttp_session.get(url, timeout=5) as response:
+                    async with self.aiohttp_session.get(f"{LLM_API_BASE}/api/tags", timeout=5) as response:
                         if response.status == 200:
                             return f"{result}\n\n✅ Successfully started Ollama!"
                 except Exception as new_e:
@@ -1356,9 +1372,12 @@ Examples:
     async def _get_available_models(self) -> List[str]:
         """Get a list of available Ollama models."""
         try:
+            # Get absolute path to ollama if available
+            ollama_path = os.environ.get("OLLAMA_PATH", "ollama")
+            
             # Execute ollama list command
             process = await asyncio.create_subprocess_exec(
-                "ollama", "list",
+                ollama_path, "list",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
