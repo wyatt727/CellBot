@@ -30,6 +30,7 @@ import tempfile
 import psutil  # For monitoring system resources
 import gc  # For garbage collection
 import glob
+import platform  # For platform-specific commands
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -1932,3 +1933,498 @@ Examples:
             end_time = datetime.now()
             duration = end_time - self.session_start
             logger.info(f"Session ended. Duration: {duration.total_seconds():.1f}s")
+
+    async def optimize_for_battery(self, _: str = "") -> str:
+        """
+        Optimize settings for battery life on mobile devices.
+        Reduces CPU and GPU usage to extend battery life.
+        """
+        try:
+            # Save original settings for report
+            old_threads = self.ollama_config.get("num_thread", 4)
+            old_gpu = self.ollama_config.get("num_gpu", 0)
+            old_tokens = self.ollama_config.get("num_predict", 1024)
+            
+            # Set minimal CPU threads (minimum of 2 to ensure responsiveness)
+            self.ollama_config["num_thread"] = min(old_threads, max(2, os.cpu_count() // 2))
+            
+            # Disable GPU if it was enabled
+            if self.ollama_config.get("num_gpu", 0) > 0:
+                self.ollama_config["num_gpu"] = 0
+            
+            # Reduce token limit to save memory and processing
+            self.ollama_config["num_predict"] = min(old_tokens, 500)
+            
+            # Enable low memory mode
+            self.low_memory_mode = True
+            
+            return f"""
+╭─ Battery Optimization ────────────────────────────────────
+│
+│  ✅ Settings optimized for battery life:
+│
+│  • CPU Threads: {old_threads} → {self.ollama_config["num_thread"]}
+│  • GPU Layers : {old_gpu} → {self.ollama_config["num_gpu"]}
+│  • Max Tokens : {old_tokens} → {self.ollama_config["num_predict"]}
+│  • Low Memory : Enabled
+│
+│  These settings will reduce power consumption and heat
+│  generation on your device while maintaining functionality.
+│
+╰──────────────────────────────────────────────────────────"""
+        except Exception as e:
+            logger.error(f"Error optimizing for battery: {e}")
+            return f"Error optimizing for battery: {str(e)}"
+    
+    async def execute_nethunter_command(self, command: str) -> str:
+        """
+        Execute a command in the NetHunter environment.
+        Provides access to Kali tools without leaving the agent.
+        """
+        if not command.strip():
+            return "Please provide a command to execute"
+        
+        try:
+            # Execute the command
+            print(f"Executing: {command}")
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await proc.communicate()
+            
+            # Format the output
+            result = ""
+            if stdout:
+                result += stdout.decode().strip()
+            if stderr:
+                if result:
+                    result += "\n\n"
+                result += "STDERR:\n" + stderr.decode().strip()
+            
+            return f"Command execution result:\n\n{result}" if result else "Command executed (no output)"
+        except Exception as e:
+            logger.error(f"Error executing command: {e}")
+            return f"Error executing command: {str(e)}"
+    
+    async def get_network_info(self, interface: str = "") -> str:
+        """
+        Get network interface information.
+        Particularly useful for mobile devices to check connectivity.
+        """
+        try:
+            # If no interface specified, show all
+            if_arg = f"-i {interface}" if interface else ""
+            
+            # Run ifconfig or ip addr command
+            if os.path.exists("/sbin/ifconfig"):
+                cmd = f"/sbin/ifconfig {if_arg}"
+            else:
+                cmd = "ip addr" + (f" show {interface}" if interface else "")
+            
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await proc.communicate()
+            
+            if proc.returncode != 0:
+                if stderr:
+                    return f"Error getting network info: {stderr.decode().strip()}"
+                return "Error getting network info (unknown error)"
+            
+            # Get additional info - routing
+            route_proc = await asyncio.create_subprocess_shell(
+                "ip route" if not os.path.exists("/sbin/route") else "/sbin/route -n",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            route_stdout, _ = await route_proc.communicate()
+            
+            # Format the output
+            formatted_stdout = stdout.decode().strip().replace('\n', '\n│ ')
+            formatted_route = route_stdout.decode().strip().replace('\n', '\n│ ')
+            result = f"""
+╭─ Network Information ───────────────────────────────────
+│
+{formatted_stdout}
+
+│ Routing Table:
+│ {formatted_route}
+│
+╰─────────────────────────────────────────────────────────"""
+            
+            return result
+        except Exception as e:
+            logger.error(f"Error getting network info: {e}")
+            return f"Error getting network info: {str(e)}"
+    
+    async def get_system_info(self, _: str = "") -> str:
+        """
+        Get detailed system information.
+        Useful for diagnostics and optimizing settings.
+        """
+        try:
+            # Get system information
+            system_info = {
+                "OS": platform.system(),
+                "OS Version": platform.version(),
+                "Architecture": platform.machine(),
+                "Python Version": platform.python_version(),
+                "CPU Cores": os.cpu_count() or 0,
+                "Memory": None,  # Will be filled below
+                "Disk Space": None  # Will be filled below
+            }
+            
+            # Get memory info
+            memory = psutil.virtual_memory()
+            system_info["Memory"] = f"{memory.used / (1024**3):.1f}GB / {memory.total / (1024**3):.1f}GB ({memory.percent}%)"
+            
+            # Get disk info
+            disk = psutil.disk_usage('/')
+            system_info["Disk Space"] = f"{disk.used / (1024**3):.1f}GB / {disk.total / (1024**3):.1f}GB ({disk.percent}%)"
+            
+            # Format the output
+            result = "╭─ System Information ───────────────────────────────────\n│\n"
+            for key, value in system_info.items():
+                result += f"│  {key}: {value}\n"
+            
+            # Add battery info if available
+            try:
+                battery = psutil.sensors_battery()
+                if battery:
+                    result += f"│  Battery: {battery.percent}% {'(Charging)' if battery.power_plugged else '(Discharging)'}\n"
+            except:
+                pass
+                
+            # Format and return
+            result += "│\n╰─────────────────────────────────────────────────────────"
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error getting system info: {e}")
+            return f"Error getting system info: {str(e)}"
+    
+    async def copy_to_clipboard(self, text: str) -> str:
+        """
+        Copy text to clipboard.
+        Uses platform-specific commands to copy text.
+        """
+        if not text.strip():
+            return "Please provide text to copy"
+            
+        try:
+            # Write to a temporary file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, mode='w', prefix='cellbot_')
+            temp_file.write(text)
+            temp_path = temp_file.name
+            temp_file.close()
+            
+            # Use platform-specific commands
+            if platform.system() == 'Darwin':  # macOS
+                os.system(f"cat {temp_path} | pbcopy")
+            elif platform.system() == 'Linux':
+                # Try common clipboard tools
+                if shutil.which('xclip'):
+                    os.system(f"cat {temp_path} | xclip -selection clipboard")
+                elif shutil.which('xsel'):
+                    os.system(f"cat {temp_path} | xsel -b")
+                elif shutil.which('termux-clipboard-set'):
+                    # Termux on Android
+                    os.system(f"cat {temp_path} | termux-clipboard-set")
+                else:
+                    return "Clipboard copy not supported on this system"
+            else:
+                return "Clipboard copy not supported on this system"
+                
+            # Clean up
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+                
+            return f"Copied {len(text)} characters to clipboard"
+        except Exception as e:
+            logger.error(f"Error copying to clipboard: {e}")
+            return f"Error copying to clipboard: {str(e)}"
+    
+    async def paste_from_clipboard(self, _: str = "") -> str:
+        """
+        Paste text from clipboard.
+        Uses platform-specific commands to get clipboard contents.
+        """
+        try:
+            # Temporary file for clipboard content
+            temp_file = tempfile.NamedTemporaryFile(delete=False, prefix='cellbot_')
+            temp_path = temp_file.name
+            temp_file.close()
+            
+            # Use platform-specific commands
+            if platform.system() == 'Darwin':  # macOS
+                os.system(f"pbpaste > {temp_path}")
+            elif platform.system() == 'Linux':
+                # Try common clipboard tools
+                if shutil.which('xclip'):
+                    os.system(f"xclip -selection clipboard -o > {temp_path}")
+                elif shutil.which('xsel'):
+                    os.system(f"xsel -b > {temp_path}")
+                elif shutil.which('termux-clipboard-get'):
+                    # Termux on Android
+                    os.system(f"termux-clipboard-get > {temp_path}")
+                else:
+                    return "Clipboard paste not supported on this system"
+            else:
+                return "Clipboard paste not supported on this system"
+            
+            # Read the content
+            with open(temp_path, 'r') as f:
+                content = f.read()
+            
+            # Clean up
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+                
+            if not content:
+                return "Clipboard is empty"
+                
+            return f"Clipboard content ({len(content)} characters):\n\n{content}"
+        except Exception as e:
+            logger.error(f"Error pasting from clipboard: {e}")
+            return f"Error pasting from clipboard: {str(e)}"
+    
+    async def check_battery_status(self, _: str = "") -> str:
+        """
+        Check battery status on mobile devices.
+        Works on Linux/Android systems with battery information.
+        """
+        try:
+            # Try psutil first
+            try:
+                battery = psutil.sensors_battery()
+                if battery:
+                    time_left = ""
+                    if battery.secsleft > 0 and not battery.power_plugged:
+                        hours, remainder = divmod(battery.secsleft, 3600)
+                        minutes, _ = divmod(remainder, 60)
+                        time_left = f" ({int(hours)}h {int(minutes)}m remaining)"
+                    
+                    return f"""
+╭─ Battery Status ─────────────────────────────────────────
+│
+│  • Level    : {battery.percent}%
+│  • Status   : {'Charging' if battery.power_plugged else 'Discharging'}{time_left}
+│
+╰─────────────────────────────────────────────────────────"""
+            except:
+                # psutil didn't work, try Android-specific approach
+                pass
+                
+            # Try Android/Linux specific approaches
+            if os.path.exists("/sys/class/power_supply/battery/capacity"):
+                # Read battery capacity
+                with open("/sys/class/power_supply/battery/capacity", "r") as f:
+                    capacity = f.read().strip()
+                
+                # Read battery status
+                status = "Unknown"
+                if os.path.exists("/sys/class/power_supply/battery/status"):
+                    with open("/sys/class/power_supply/battery/status", "r") as f:
+                        status = f.read().strip()
+                
+                return f"""
+╭─ Battery Status ─────────────────────────────────────────
+│
+│  • Level    : {capacity}%
+│  • Status   : {status}
+│
+╰─────────────────────────────────────────────────────────"""
+            else:
+                return "Battery information not available on this system"
+                
+        except Exception as e:
+            logger.error(f"Error checking battery status: {e}")
+            return f"Error checking battery status: {str(e)}"
+    
+    def get_welcome_banner(self) -> str:
+        """
+        Get the welcome banner displayed when the agent starts.
+        """
+        return f"""
+╭───────────────────────────────────────────────────────────────╮
+│                                                               │
+│                   CellBot for NetHunter v1.0                  │
+│                                                               │
+│  • Model: {self.model}                                        
+│  • Type /help for available commands                          │
+│  • Control+C to exit                                          │
+│                                                               │
+╰───────────────────────────────────────────────────────────────╯
+"""
+    
+    async def get_user_input(self) -> Optional[str]:
+        """
+        Get user input with proper handling of EOF and keyboard interrupts.
+        
+        Returns:
+            User input string or None if EOF
+        """
+        try:
+            return input("CellBot> ")
+        except EOFError:
+            return None
+        except KeyboardInterrupt:
+            # Return empty string on Ctrl+C so the run loop can continue
+            print()  # Print newline for better formatting
+            return ""
+    
+    async def process_command(self, command: str) -> None:
+        """
+        Process a command (message starting with /).
+        
+        Args:
+            command: The command with arguments
+        """
+        if not command.startswith('/'):
+            return
+            
+        # Extract command name and arguments
+        cmd_parts = command[1:].split(maxsplit=1)
+        cmd_name = cmd_parts[0].lower()
+        cmd_args = cmd_parts[1] if len(cmd_parts) > 1 else ""
+        
+        # Handle built-in commands
+        if cmd_name == "!!":
+            # Special case for repeat
+            await self.repeat_last_command("")
+            return
+        
+        # Check if this is one of our command aliases
+        if cmd_name in self.command_aliases:
+            # This is a command we know
+            handler = self.command_aliases[cmd_name]
+            
+            try:
+                # Execute the handler
+                result = await handler(cmd_args)
+                
+                # If the handler returns a string, print it
+                if isinstance(result, str):
+                    print(result)
+            except Exception as e:
+                print(f"❌ Error executing command '/{cmd_name}': {str(e)}")
+                logger.error(f"Error in command '/{cmd_name}': {e}", exc_info=True)
+        else:
+            # Unknown command
+            print(f"❌ Unknown command: '/{cmd_name}'\nType /help for available commands")
+    
+    async def process_query(self, query: str) -> None:
+        """
+        Process a user query (non-command input).
+        Gets a response from the LLM and handles code execution.
+        
+        Args:
+            query: The user's query
+        """
+        if not query.strip():
+            return
+            
+        # Store as last user query for repeat feature
+        self.last_user_query = query
+        
+        try:
+            # Call process_message to get LLM response
+            start_time = datetime.now()
+            response, was_cached, code_executed = await self.process_message(query)
+            response_time = (datetime.now() - start_time).total_seconds()
+            
+            # Add to conversation history
+            self.add_message("user", query)
+            self.add_message("assistant", response)
+            
+            # Format and display the response
+            print("\n┌─ Response " + "─" * 55)
+            
+            if was_cached:
+                print("│")
+                print("│  [Response from cache]")
+                
+            print("│")
+            for line in response.strip().split("\n"):
+                print(f"│  {line}")
+                
+            if DEBUG_MODE:
+                print("│")
+                print(f"│  ⏱  Time: {response_time:.2f}s")
+                
+            print("└" + "─" * 64)
+            
+        except Exception as e:
+            logger.error(f"Error processing query: {e}", exc_info=True)
+            print(f"\n❌ Error: {str(e)}")
+    
+    async def _handle_history_command(self, command: str, args: str) -> Optional[str]:
+        """
+        Handle the history command and its subcommands.
+        
+        Args:
+            command: The command (should be 'history')
+            args: Arguments to the command
+            
+        Returns:
+            Optional response string if the command was handled
+        """
+        if command != "history":
+            return None
+            
+        # Split into subcommand and its arguments
+        parts = args.split(maxsplit=1)
+        subcommand = parts[0].lower() if parts else ""
+        subcommand_args = parts[1] if len(parts) > 1 else ""
+        
+        if not subcommand:
+            # Just show history
+            await self.show_command_history("")
+            return ""
+            
+        if subcommand == "clear":
+            # Clear history
+            readline.clear_history()
+            self.command_history.save_history()
+            return "Command history cleared"
+            
+        if subcommand == "search":
+            # Search history
+            if not subcommand_args:
+                return "Please provide a search term"
+                
+            matches = []
+            for i in range(1, readline.get_current_history_length() + 1):
+                item = readline.get_history_item(i)
+                if subcommand_args.lower() in item.lower():
+                    matches.append((i, item))
+                    
+            if not matches:
+                return f"No matches found for '{subcommand_args}'"
+                
+            print(f"\nFound {len(matches)} matches for '{subcommand_args}':")
+            for i, item in matches:
+                print(f"{i}: {item}")
+                
+            return ""
+            
+        if subcommand == "save":
+            # Save history to file
+            path = subcommand_args or "cellbot_history.txt"
+            with open(path, "w") as f:
+                for i in range(1, readline.get_current_history_length() + 1):
+                    f.write(f"{readline.get_history_item(i)}\n")
+            return f"History saved to {path}"
+            
+        return f"Unknown history subcommand: {subcommand}"
