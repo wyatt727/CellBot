@@ -123,7 +123,7 @@ async def get_llm_response_async(
                         if response.status == 500 and "broken pipe" in error_message.lower():
                             logger.error(f"Broken pipe error detected, likely due to resource constraints")
                             # Provide more comprehensive error guidance
-                            raise Exception(f"LLM API error: {error_message}\n\nThis error can occur for several reasons:\n1. Resource constraints - the model may be using too much memory\n2. Network connectivity issues\n3. Ollama server instability\n\nTry these fixes:\n- Use '/model llama3:8b' to switch to a smaller model\n- Restart Ollama with 'ollama serve' in a separate terminal\n- Use shorter prompts or break down complex questions\n- Close other resource-intensive apps")
+                            raise Exception(f"LLM API error: {error_message}\n\nThis error can occur for several reasons:\n1. Resource constraints - the model may be using too much memory\n2. Network connectivity issues\n3. Ollama server instability\n\nTry these fixes:\n- Restart Ollama with 'ollama serve' in a separate terminal\n- Use shorter prompts or break down complex questions\n- Close other resource-intensive apps")
                         
                         # Handle general Ollama server issues
                         if response.status == 500 or "ollama" in error_message.lower():

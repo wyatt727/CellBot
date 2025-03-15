@@ -26,9 +26,9 @@ if platform.system() == "Linux" and (
     os.path.exists("/system/build.prop") or
     os.path.exists("/data/data/com.termux")
 ):
-    # For Android/NetHunter, use a smaller model by default
-    DEFAULT_MODEL = os.environ.get("CELLBOT_MODEL", "llama3:8b")
-    logger.info("Mobile device detected, using smaller default model: llama3:8b")
+    # For Android/NetHunter, use Mistral 7B by default
+    DEFAULT_MODEL = os.environ.get("CELLBOT_MODEL", "mistral:7b")
+    logger.info("Mobile device detected, using default model: mistral:7b")
 else:
     # For desktop/server systems, use the standard model
     DEFAULT_MODEL = os.environ.get("CELLBOT_MODEL", "mistral:7b")

@@ -7,7 +7,7 @@ SYSTEM_PROMPT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".
 # LLM API configuration
 OLLAMA_API_BASE = "http://127.0.0.1:11434"  # Base URL for Ollama API
 
-LLM_MODEL = "llama3:8b"  # Changed from deepseek-coder-v2 to a lighter, faster model
+LLM_MODEL = "mistral:7b"  # Default model
 
 # Execution parameters
 MAX_FIX_ATTEMPTS = 2
