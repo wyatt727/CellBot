@@ -25,9 +25,6 @@ MAX_CONCURRENT_LLM_CALLS = 3
 MAX_CONCURRENT_CODE_EXECUTIONS = 3
 RESPONSE_TIMEOUT = 120
 
-# Database configuration
-DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "conversation.db")
-
 # Directory for generated code files
 GENERATED_CODE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "generated_code")
 

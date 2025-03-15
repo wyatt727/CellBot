@@ -10,8 +10,7 @@ import textwrap
 import shutil
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple, Dict
-# Replace the import of the real ConversationDB with our mock version
-from .mock_db import MockConversationDB
+# Remove MockConversationDB import
 from .system_prompt import get_system_prompt
 from .llm_client import get_llm_response_async
 from .code_executor import execute_code_async
@@ -132,13 +131,10 @@ class CommandHistory:
 
 class MinimalAIAgent:
     """
-    Minimal AI Agent that uses a local SQLite database for conversation history.
-    The agent first checks if there is a cached successful exchange whose user prompt is
-    very similar (≥ 95%) to the current query. If so, it immediately uses that cached response
-    (thus bypassing new LLM text generation), but still processes any code execution.
-    Otherwise, it builds context by combining:
+    Minimal AI Agent that uses simple in-memory storage for session data.
+    The agent builds context by combining:
       - The system prompt.
-      - An example interaction from the success DB (if the best match is at least 80% similar).
+      - Recent conversation messages.
       - The current user query.
     This context is then sent to the LLM.
     
@@ -147,7 +143,7 @@ class MinimalAIAgent:
     - Command history with navigation
     - Model switching at runtime
     - Performance metrics and diagnostics
-    - Conversation history management
+    - Session-based conversation management
     """
     def __init__(self, model="mistral:7b", timeout=60, max_llm_calls=2, max_code_execs=2, debug_mode=False, save_code=False):
         """Initialize the minimal agent."""
@@ -177,9 +173,11 @@ class MinimalAIAgent:
             self.readline_available = False
             self.logger.warning("readline module not available, command history disabled")
         
-        # Use our MockConversationDB instead of the real ConversationDB
-        self.db = MockConversationDB()
-        self.last_user_query = self.db.get_setting("last_user_query") or ""
+        # Simple in-memory storage to replace MockConversationDB
+        self.settings = {}
+        self.conversation = []
+        self.successful_exchanges = []
+        self.last_user_query = ""
         
         # Store the timeout value
         self.default_timeout = timeout
@@ -197,7 +195,7 @@ class MinimalAIAgent:
         self.code_semaphore = asyncio.Semaphore(max_code_execs)
         self.command_history = CommandHistory()
         self.session_start = datetime.now()
-        self.in_comparison_mode = self.db.get_setting("in_comparison_mode") == "true"
+        self.in_comparison_mode = False
         
         # Ollama-specific optimizations
         # Try to import default values from android_config
@@ -228,17 +226,17 @@ class MinimalAIAgent:
         # Load Ollama config from environment, settings, or auto-detection
         if os.getenv("OLLAMA_NUM_THREAD"):
             self.ollama_config["num_thread"] = int(os.getenv("OLLAMA_NUM_THREAD"))
-        elif self.db.get_setting("ollama_num_thread"):
+        elif self.settings.get("ollama_num_thread"):
             try:
-                self.ollama_config["num_thread"] = int(self.db.get_setting("ollama_num_thread"))
+                self.ollama_config["num_thread"] = int(self.settings.get("ollama_num_thread"))
             except (ValueError, TypeError):
                 pass  # Use default if invalid
                 
         if os.getenv("OLLAMA_NUM_GPU"):
             self.ollama_config["num_gpu"] = int(os.getenv("OLLAMA_NUM_GPU"))
-        elif self.db.get_setting("ollama_num_gpu"):
+        elif self.settings.get("ollama_num_gpu"):
             try:
-                self.ollama_config["num_gpu"] = int(self.db.get_setting("ollama_num_gpu"))
+                self.ollama_config["num_gpu"] = int(self.settings.get("ollama_num_gpu"))
             except (ValueError, TypeError):
                 # Use auto-detected GPU if available
                 self.ollama_config["num_gpu"] = auto_gpu_layers
@@ -252,9 +250,9 @@ class MinimalAIAgent:
                 self.ollama_config["temperature"] = float(os.getenv("OLLAMA_TEMPERATURE"))
             except (ValueError, TypeError):
                 pass  # Use default if invalid
-        elif self.db.get_setting("ollama_temperature"):
+        elif self.settings.get("ollama_temperature"):
             try:
-                self.ollama_config["temperature"] = float(self.db.get_setting("ollama_temperature"))
+                self.ollama_config["temperature"] = float(self.settings.get("ollama_temperature"))
             except (ValueError, TypeError):
                 pass  # Use default if invalid
                 
@@ -264,9 +262,9 @@ class MinimalAIAgent:
                 self.ollama_config["num_predict"] = int(os.getenv("OLLAMA_NUM_PREDICT"))
             except (ValueError, TypeError):
                 pass  # Use default if invalid
-        elif self.db.get_setting("ollama_num_predict"):
+        elif self.settings.get("ollama_num_predict"):
             try:
-                self.ollama_config["num_predict"] = int(self.db.get_setting("ollama_num_predict"))
+                self.ollama_config["num_predict"] = int(self.settings.get("ollama_num_predict"))
             except (ValueError, TypeError):
                 pass  # Use default if invalid
         
@@ -520,8 +518,8 @@ class MinimalAIAgent:
             memory = psutil.virtual_memory()
             
             # Get message counts from database
-            user_messages = self.db.get_message_count("user")
-            assistant_messages = self.db.get_message_count("assistant")
+            user_messages = len(self.conversation)
+            assistant_messages = len(self.successful_exchanges)
             
             # Display memory and session stats
             print("\n╭─ Session Statistics ──────────────────────────────────")
@@ -580,25 +578,31 @@ class MinimalAIAgent:
     async def _build_context(self, user_message: str, no_cache: bool = False) -> List[Dict[str, str]]:
         """
         Build the context for the conversation, including:
-        1. System prompt (with dynamically included similar examples)
+        1. System prompt
         2. Recent conversation history
-        3. Similar successful exchanges (if caching is enabled)
+        3. Current user message
         
         Args:
             user_message: The current user message
-            no_cache: If True, skips retrieving similar examples from cache
+            no_cache: Not used - kept for API compatibility
         
         Returns:
             List of message dictionaries forming the conversation context
         """
         context = []
         
-        # 1. Add system prompt with relevant examples
-        system_prompt = await get_system_prompt(user_message if not no_cache else None)
+        # 1. Add system prompt
+        system_prompt = await get_system_prompt(None)
         context.append({"role": "system", "content": system_prompt})
         
-        # 2. Add recent conversation history
-        context.extend(self.db.get_recent_messages())
+        # 2. Add recent conversation history (most recent 5 messages)
+        recent_messages = []
+        for msg in self.conversation[-10:]:  # Get the last 10 to filter
+            if len(recent_messages) >= 5:
+                break
+            recent_messages.append({"role": msg["role"], "content": msg["content"]})
+        
+        context.extend(recent_messages[-5:])  # Add up to 5 most recent messages
         
         # 3. Add current user message
         context.append({"role": "user", "content": user_message})
@@ -785,7 +789,7 @@ class MinimalAIAgent:
         try:
             if not no_cache:
                 phase = "database_lookup"
-                similar_exchanges = self.db.find_successful_exchange(message)
+                similar_exchanges = self.successful_exchanges
                 
                 if similar_exchanges:
                     best_match = similar_exchanges[0]
@@ -897,7 +901,7 @@ class MinimalAIAgent:
             blocks = self.extract_code_from_response(response)
             
             if not self.in_comparison_mode and not no_cache and blocks:
-                self.db.add_successful_exchange(message, response)
+                self.successful_exchanges.append((message, response, similarity))
                 if DEBUG_MODE:
                     print("│  ✓ Response cached")
             
@@ -994,7 +998,7 @@ Examples:
         
         if subcommand == "list":
             # List successful exchanges with optional search filter
-            successes = self.db.list_successful_exchanges(search_term) if search_term else self.db.list_successful_exchanges()
+            successes = [exchange[0] for exchange in self.successful_exchanges]
             
             if not successes:
                 print("\nNo successful exchanges found." + (f" (filter: '{search_term}')" if search_term else ""))
@@ -1003,25 +1007,22 @@ Examples:
             print(f"\nFound {len(successes)} successful exchanges:" + (f" (filter: '{search_term}')" if search_term else ""))
             for i, entry in enumerate(successes[:10], 1):  # Show only first 10
                 # Truncate for display
-                user_msg = entry[0][:50] + "..." if len(entry[0]) > 50 else entry[0]
-                response = entry[1][:50] + "..." if len(entry[1]) > 50 else entry[1]
-                print(f"{i}. User: {user_msg}")
-                print(f"   Response: {response}\n")
+                print(f"{i}. {entry[:50]}..." if len(entry) > 50 else entry)
             
             if len(successes) > 10:
                 print(f"... and {len(successes) - 10} more.")
         
         elif subcommand == "stats":
             # Show statistics about successful exchanges
-            count = len(self.db.list_successful_exchanges())
+            count = len(self.successful_exchanges)
             print(f"\nTotal successful exchanges: {count}")
             
             # Top keywords if available
             print("Most common keywords in successful exchanges:")
             try:
                 words = []
-                for entry in self.db.list_successful_exchanges():
-                    words.extend(re.findall(r'\b\w{3,}\b', entry[0].lower()))
+                for exchange in self.successful_exchanges:
+                    words.extend(re.findall(r'\b\w{3,}\b', exchange[0].lower()))
                 
                 from collections import Counter
                 word_counts = Counter(words).most_common(5)
@@ -1344,7 +1345,7 @@ Examples:
             self.ollama_config['num_thread'] = new_thread_count
             
             # Save to settings DB for persistence
-            self.db.set_setting("ollama_num_thread", str(new_thread_count))
+            self.settings["ollama_num_thread"] = str(new_thread_count)
             
             return f"CPU thread count set to {new_thread_count}"
         except ValueError:
@@ -1374,7 +1375,7 @@ Examples:
             self.ollama_config['num_gpu'] = new_gpu_layers
             
             # Save to settings DB for persistence
-            self.db.set_setting("ollama_num_gpu", str(new_gpu_layers))
+            self.settings["ollama_num_gpu"] = str(new_gpu_layers)
             
             return f"GPU layer count set to {new_gpu_layers}"
         except ValueError:
@@ -1404,7 +1405,7 @@ Examples:
             self.ollama_config['temperature'] = new_temperature
             
             # Save to settings DB for persistence
-            self.db.set_setting("ollama_temperature", str(new_temperature))
+            self.settings["ollama_temperature"] = str(new_temperature)
             
             return f"Temperature set to {new_temperature}"
         except ValueError:
@@ -1434,7 +1435,7 @@ Examples:
             self.ollama_config['num_predict'] = new_num_predict
             
             # Save to settings DB for persistence
-            self.db.set_setting("ollama_num_predict", str(new_num_predict))
+            self.settings["ollama_num_predict"] = str(new_num_predict)
             
             return f"Max tokens (num_predict) set to {new_num_predict}"
         except ValueError:
@@ -1629,8 +1630,8 @@ Examples:
                 self.ollama_config["num_predict"] = optimal_params["num_predict"]
                 
                 # Save to settings DB for persistence
-                self.db.set_setting("ollama_temperature", str(optimal_params["temperature"]))
-                self.db.set_setting("ollama_num_predict", str(optimal_params["num_predict"]))
+                self.settings["ollama_temperature"] = str(optimal_params["temperature"])
+                self.settings["ollama_num_predict"] = str(optimal_params["num_predict"])
                 
                 print("\n╭─ Auto-Optimization ─────────────────────────────────────")
                 print("│")
@@ -2199,7 +2200,7 @@ Examples:
             # Store for potential repeat
             if not user_input.startswith('/'):
                 self.last_user_query = user_input
-                self.db.set_setting("last_user_query", user_input)
+                self.settings["last_user_query"] = user_input
                 
             return user_input
         except (EOFError, KeyboardInterrupt):
@@ -2264,8 +2265,8 @@ Examples:
             # If there's a response, print it
             if response:
                 # Add to conversation history
-                self.db.add_message("user", query)
-                self.db.add_message("assistant", response)
+                self.add_message("user", query)
+                self.add_message("assistant", response)
                 
                 # Print the response
                 print(f"\n{response}")
@@ -2283,3 +2284,25 @@ Examples:
             
         # Periodically check memory usage
         await self.check_memory_usage()
+
+    async def cleanup(self):
+        """Clean up resources."""
+        try:
+            # Close resources
+            if hasattr(self, 'aiohttp_session') and self.aiohttp_session:
+                await self.aiohttp_session.close()
+            
+            # Close database connection
+            self.close()
+            
+            # Clean up any background tasks
+            for task in _BACKGROUND_TASKS:
+                if not task.done():
+                    task.cancel()
+            
+            # Force garbage collection
+            gc.collect()
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+            # Continue with shutdown even if there's an error

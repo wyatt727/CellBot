@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 # Base paths
 HOME_DIR = os.path.expanduser("~")
 NETHUNTER_BASE_DIR = os.path.join(HOME_DIR, "nethunter_cellbot")
-DB_FILE = os.path.join(NETHUNTER_BASE_DIR, "conversation.db")
 SYSTEM_PROMPT_PATH = os.path.join(NETHUNTER_BASE_DIR, "system-prompt.txt")
 LOG_PATH = os.path.join(NETHUNTER_BASE_DIR, "cellbot.log")
 GENERATED_CODE_DIR = os.path.join(NETHUNTER_BASE_DIR, "generated_code")
@@ -33,15 +32,15 @@ MAX_RESPONSE_TOKENS = 2048  # Limit token count for mobile
 DEFAULT_TEMPERATURE = 0.5  # More deterministic responses for mobile
 DEFAULT_NUM_PREDICT = 1536  # Limit token generation for mobile battery savings
 
-# Database settings
-DB_CONNECTION_TIMEOUT = 5  # seconds
-DB_CONNECTION_POOL_SIZE = 3
-DB_MAX_SIMILARITY_RESULTS = 5
-
 # Network settings
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_FACTOR = 1.5
 NETWORK_TIMEOUT = 30  # seconds
+
+# Context settings
+CONTEXT_MSG_COUNT = 5
+MAX_SIMILAR_EXAMPLES = 1
+SIMILARITY_THRESHOLD = 0.94
 
 # Device information cache
 _device_info_cache: Optional[Dict[str, Any]] = None
