@@ -1,14 +1,14 @@
 aiohttp>=3.8.4
 aiofiles>=0.8.0
 psutil>=5.9.0
-sqlite3>=0.0.0
 python-dateutil>=2.8.2
 backoff>=2.2.1
 markdown>=3.4.3
 diskcache>=5.4.0
-difflib
 argparse
 urllib3>=2.0.4
-asyncio
-readline
-python-sqlite3 
+# Packages below are typically part of the standard library
+# and may not need to be installed separately
+# asyncio
+# readline
+# difflib 

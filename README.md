@@ -10,6 +10,7 @@ A command-line AI assistant optimized for Kali NetHunter running on the OnePlus 
 - **Web Search**: Limited web search capabilities when network is available
 - **Auto-detection**: Automatically detects device capabilities for optimal performance
 - **Mobile Optimizations**: Database connection pooling, caching, and resource-aware processing
+- **Virtual Environment**: Automatically creates and uses a Python virtual environment for isolated dependencies
 
 ## Installation
 
@@ -39,10 +40,10 @@ If you have the code on your desktop/laptop, you can use the transfer script:
 
 2. Copy all files to your NetHunter device using any transfer method (USB, ADB, Network share)
 
-3. Install dependencies:
+3. Use the setup script to create a virtual environment and install dependencies:
    ```bash
    cd ~/nethunter_cellbot
-   pip3 install -r requirements.txt
+   ./setup.py setup
    ```
 
 ## Testing Your Environment
@@ -50,36 +51,69 @@ If you have the code on your desktop/laptop, you can use the transfer script:
 Before running CellBot, you can verify your environment is properly set up:
 
 ```bash
+./setup.py info
+```
+
+This will show:
+- Python version being used
+- Virtual environment location
+- Installed dependencies
+
+For more detailed system checks:
+```bash
 python3 test_nethunter_env.py
 ```
 
-This script will check:
-- Python version compatibility
-- NetHunter-specific paths
-- Required dependencies
-- File system access
-- Network connectivity
-- Project structure
-- Ollama availability (if using local models)
-
-The test will provide a summary of results and next steps based on what it finds.
-
 ## Usage
 
-1. Navigate to the CellBot directory:
-   ```bash
-   cd ~/nethunter_cellbot
-   ```
+### Using the Simplified Launcher
 
-2. Run CellBot:
-   ```bash
-   python3 nethunter_cellbot.py
-   ```
+The easiest way to run CellBot is with the main launcher script:
 
-   Or with options:
-   ```bash
-   python3 nethunter_cellbot.py --model mistral:7b --threads 4
-   ```
+```bash
+./cellbot.py
+```
+
+This automatically:
+1. Creates a virtual environment if it doesn't exist
+2. Installs required dependencies
+3. Runs CellBot using the virtual environment
+
+### Running with Options
+
+To run with specific options:
+
+```bash
+./cellbot.py run.py --model mistral:7b --threads 4
+```
+
+### Advanced Usage with Setup Script
+
+For more control, you can use the setup script directly:
+
+```bash
+# Set up the virtual environment
+./setup.py setup
+
+# Run CellBot
+./setup.py run run.py
+
+# Show environment information
+./setup.py info
+```
+
+### Manual Usage (Legacy)
+
+If needed, you can still run without the setup script:
+
+```bash
+python3 nethunter_cellbot.py
+```
+
+Or with options:
+```bash
+python3 nethunter_cellbot.py --model mistral:7b --threads 4
+```
 
 ## Command-Line Options
 
