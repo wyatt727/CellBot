@@ -5,6 +5,7 @@ import json
 import os
 import asyncio
 from typing import List, Dict, Any, Optional
+from datetime import datetime
 
 # Try to import from android_config first, fall back to regular config
 try:
@@ -46,6 +47,7 @@ async def get_llm_response_async(
         The LLM response text
     """
     own_session = False
+    logger.info(f"get_llm_response_async called with timeout: {timeout}")  # Added logging
     
     # If no session is provided, create one
     if session is None:
@@ -53,6 +55,13 @@ async def get_llm_response_async(
         session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=timeout if timeout else 60)  # Default to 60s
         )
+        logger.info(f"Created new session with timeout: {timeout if timeout else 60}s")
+    else:
+        # Log the timeout of the provided session
+        if hasattr(session, '_timeout') and session._timeout:
+            logger.info(f"Using existing session with timeout: {session._timeout.total}")
+        else:
+            logger.info("Using existing session with unknown timeout")
     
     try:
         # Prepare request body
@@ -68,9 +77,9 @@ async def get_llm_response_async(
             
         # For mobile, add default options only if not already set
         if "temperature" not in options:
-            options["temperature"] = 0.5  # Lower temp = more predictable responses
+            options["temperature"] = 0.3  # Lower temp = more deterministic responses
         if "num_predict" not in options:
-            options["num_predict"] = 768  # Limit response length to save resources
+            options["num_predict"] = 500  # Limit response length to save resources
         if "num_thread" not in options and not num_thread:
             # Try to detect cores and use a reasonable default
             import multiprocessing
@@ -90,11 +99,18 @@ async def get_llm_response_async(
         
         for attempt in range(max_retries):
             try:
+                # IMPORTANT: Don't create a new ClientTimeout here, as it overrides the session timeout
+                # Instead, use the timeout from the session that was provided or created
+                logger.info(f"Sending request (attempt {attempt+1}/{max_retries})")
+                request_start = datetime.now()
+                
                 async with session.post(
                     f"{LLM_API_BASE}/api/chat",
-                    json=request_body,
-                    timeout=aiohttp.ClientTimeout(total=timeout if timeout else 60)  # Use 60 seconds as default
+                    json=request_body
                 ) as response:
+                    request_duration = (datetime.now() - request_start).total_seconds()
+                    logger.info(f"Got response in {request_duration:.2f}s with status {response.status}")
+                    
                     if response.status != 200:
                         error_text = await response.text()
                         try:
@@ -138,6 +154,7 @@ async def get_llm_response_async(
                     try:
                         data = await response.json()
                         response_message = data.get("message", {}).get("content", "")
+                        logger.info(f"Successfully extracted response of {len(response_message)} chars")
                         return response_message
                     except json.JSONDecodeError as e:
                         logger.error(f"Error parsing LLM response: {e}")
@@ -148,9 +165,11 @@ async def get_llm_response_async(
             except asyncio.TimeoutError:
                 if attempt < max_retries - 1:
                     wait_time = retry_delay * (2 ** attempt)
-                    logger.warning(f"Request timed out. Retrying in {wait_time}s...")
+                    logger.warning(f"Request timed out after attempt {attempt+1}. Retrying in {wait_time}s...")
+                    logger.warning(f"Timeout setting was: {timeout}s")
                     await asyncio.sleep(wait_time)
                 else:
+                    logger.error(f"LLM request timed out. Attempt {attempt+1} of {max_retries}. Timeout setting: {timeout}s")
                     raise TimeoutError(f"LLM request timed out after {timeout}s and {max_retries} retries")
                     
             except aiohttp.ClientError as e:
@@ -165,6 +184,7 @@ async def get_llm_response_async(
         # Close the session if we created it
         if own_session:
             await session.close()
+            logger.info("Closed own session")
             
     # This code should never be reached due to returns or exceptions above
     raise Exception("Unexpected code path in get_llm_response_async")

@@ -34,14 +34,14 @@ else:
     DEFAULT_MODEL = os.environ.get("CELLBOT_MODEL", "mistral:7b")
 
 # Performance settings
-DEFAULT_THREADS = 2  # Conservative default for mobile
+DEFAULT_THREADS = 8  # Conservative default for mobile
 DEFAULT_GPU_LAYERS = 0  # Default to CPU-only
 MAX_CONCURRENT_LLM_CALLS = 2
 MAX_CONCURRENT_CODE_EXECS = 2
 DEFAULT_TIMEOUT = 180  # seconds
-MAX_RESPONSE_TOKENS = 2048  # Limit token count for mobile
-DEFAULT_TEMPERATURE = 0.5  # More deterministic responses for mobile
-DEFAULT_NUM_PREDICT = 1536  # Limit token generation for mobile battery savings
+MAX_RESPONSE_TOKENS = 500  # Limit token count for mobile
+DEFAULT_TEMPERATURE = 0.3  # More deterministic responses for mobile
+DEFAULT_NUM_PREDICT = 500  # Limit token generation for mobile battery savings
 
 # Network settings
 RETRY_ATTEMPTS = 3
@@ -211,27 +211,20 @@ def get_llm_settings() -> Dict[str, Any]:
     """
     Get LLM-related settings based on device capabilities.
     """
-    device_info = get_device_info()
-    
     # Base settings
     settings = {
         "model": DEFAULT_MODEL,
         "timeout": DEFAULT_TIMEOUT,
         "max_tokens": MAX_RESPONSE_TOKENS,
-        "temperature": 0.7,
+        "temperature": DEFAULT_TEMPERATURE,  # Use the 0.3 default
         "top_p": 0.9,
         "frequency_penalty": 0.0,
-        "presence_penalty": 0.0
+        "presence_penalty": 0.0,
+        "num_predict": DEFAULT_NUM_PREDICT  # Use the 500 default
     }
     
-    # Adjust for mobile
-    if device_info.get("is_nethunter", False):
-        # More conservative settings for mobile
-        settings.update({
-            "temperature": DEFAULT_TEMPERATURE,  # More deterministic responses
-            "max_tokens": DEFAULT_NUM_PREDICT,  # Shorter responses to save resources
-            "timeout": 120       # Shorter timeout
-        })
+    # We no longer adjust these settings based on device type
+    # All systems use the same defaults now
     
     return settings
 
@@ -248,24 +241,20 @@ def get_optimal_llm_parameters() -> Dict[str, Any]:
     
     # Start with default parameters
     params = {
-        "temperature": DEFAULT_TEMPERATURE,
-        "num_predict": DEFAULT_NUM_PREDICT
+        "temperature": DEFAULT_TEMPERATURE,  # Use 0.3 as the default temperature
+        "num_predict": DEFAULT_NUM_PREDICT   # Use 500 as the default token limit
     }
     
-    # If not on mobile, use higher token limits and more neutral temperature
+    # Non-mobile systems always use the default values now
     if not device_info.get("is_nethunter", False):
-        params["temperature"] = 0.7
-        params["num_predict"] = 2048
         return params
     
     # For mobile, check available memory and adjust
     ram_mb = device_info.get("ram_mb", 0)
     if ram_mb > 0:
-        # If low memory, reduce token limit further
-        if ram_mb < 4000:  # Less than 4GB RAM
-            params["num_predict"] = 1024
-        elif ram_mb > 8000:  # More than 8GB RAM
-            params["num_predict"] = 1536
+        # If very low memory, reduce token limit further
+        if ram_mb < 2000:  # Less than 2GB RAM
+            params["num_predict"] = min(params["num_predict"], 300)
     
     # Try to detect battery status
     try:
@@ -273,10 +262,9 @@ def get_optimal_llm_parameters() -> Dict[str, Any]:
             with open("/sys/class/power_supply/battery/capacity", "r") as f:
                 battery_level = int(f.read().strip())
                 
-            # If battery is low, use more conservative settings
-            if battery_level < 30:
-                params["num_predict"] = min(params["num_predict"], 1024)
-                params["temperature"] = 0.3  # More deterministic to save compute
+            # If battery is critical, use even more conservative settings
+            if battery_level < 15:
+                params["num_predict"] = min(params["num_predict"], 300)
     except Exception:
         # If we can't read battery, just use defaults
         pass

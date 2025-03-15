@@ -179,10 +179,20 @@ class MinimalAIAgent:
         self.successful_exchanges = []
         self.last_user_query = ""
         
-        # Store the timeout value
+        # Store the timeout value 
         self.default_timeout = timeout
+        
+        # Setup aiohttp session with proper timeout
+        if timeout == 0:
+            # 0 means no timeout
+            session_timeout = None
+            logger.info("Creating aiohttp session with no timeout")
+        else:
+            session_timeout = timeout
+            logger.info(f"Creating aiohttp session with timeout: {timeout}s")
+            
         self.aiohttp_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=timeout)
+            timeout=aiohttp.ClientTimeout(total=session_timeout)
         )
         
         # Apply configuration settings
@@ -750,55 +760,49 @@ class MinimalAIAgent:
         
         Args:
             message: The message to process
-            no_cache: If True, bypass the cache
+            no_cache: Whether to skip the cache
             
         Returns:
             Tuple of (response, was_cached, code_executed)
-            - response: The text response from the LLM
-            - was_cached: Whether the response was from the cache
-            - code_executed: Whether code blocks were executed
         """
-        start_time = datetime.now()
+        # Check if it's a /nocache command first
+        if message.startswith('/nocache '):
+            no_cache = True
+            message = message[9:].strip()  # Remove /nocache prefix
+            print("ℹ️  Cache disabled for this request")
         
-        # Clear memory more aggressively on mobile devices to prevent OOM issues
-        if self._is_mobile_device():
-            # Force garbage collection before processing
-            gc.collect()
-            
-            # Check memory usage and optimize if needed
-            await self.check_memory_usage(display_info=False)
-        
-        # Store for command completion context
-        self.current_input = message
-        
-        # Initialize similarity variable to avoid reference errors
-        similarity = 0.0
-        similar_exchanges = []
-        
-        # Turbo search mode with ?! prefix (ultra-fast search)
-        if message.startswith('?!'):
-            search_query = message[2:].strip()
-            return await self._turbo_search(search_query), False, False
-        
-        # Standard quick search with ? prefix
-        elif message.startswith('?'):
-            search_query = message[1:].strip()
-            search_results = await self.web_search(search_query)
-            return search_results, False, False
-        
-        # Check for /notimeout flag
+        # Check if it's a command that extends timeout
         use_extended_timeout = False
+        original_timeout = self.ollama_config.get("timeout", 60)
+        
         if message.startswith('/notimeout '):
             use_extended_timeout = True
             message = message[10:].strip()  # Remove /notimeout prefix
-            original_timeout = self.ollama_config["timeout"]
-            self.ollama_config["timeout"] = 0  # Disable timeout
-            print("ℹ️  Timeout disabled - will wait indefinitely for response")
             
-            # Also update aiohttp session timeout
+            # Store the original timeout for restoration later
+            logger.info(f"Disabling timeout (original was {original_timeout}s)")
+            
+            # Store the old session to close it properly
+            old_session = self.aiohttp_session
+            
+            # Update the timeout in the config
+            self.ollama_config["timeout"] = 0  # Disable timeout
+            
+            # Update aiohttp session timeout
             self.aiohttp_session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=0)  # 0 means no timeout
+                timeout=aiohttp.ClientTimeout(total=None)  # None means no timeout
             )
+            logger.info("Created new aiohttp session with no timeout")
+            
+            # Close the old session asynchronously
+            if old_session:
+                try:
+                    await old_session.close()
+                    logger.info("Closed old aiohttp session")
+                except Exception as e:
+                    logger.warning(f"Error closing old session: {e}")
+            
+            print("ℹ️  Timeout disabled - will wait indefinitely for response")
         
         # Extract command if message starts with /
         command, args = self._extract_command_and_args(message)
@@ -1521,20 +1525,44 @@ Examples:
             if timeout_int > 600:
                 return "Warning: Very long timeout (>10 minutes) might lead to network issues"
                 
+            # Store the old session to close it properly
+            old_session = self.aiohttp_session
+            
             # Set the value
             self.ollama_config["timeout"] = timeout_int
+            logger.info(f"Setting Ollama timeout to: {timeout_int}s")
             
-            # Also update aiohttp session timeout
+            # Create a new session with the new timeout
             if timeout_int == 0:
                 # 0 means no timeout
                 self.aiohttp_session = aiohttp.ClientSession(
                     timeout=aiohttp.ClientTimeout(total=None)
                 )
+                logger.info("Created new aiohttp session with no timeout")
+                
+                # Close the old session asynchronously
+                if old_session:
+                    try:
+                        await old_session.close()
+                        logger.info("Closed old aiohttp session")
+                    except Exception as e:
+                        logger.warning(f"Error closing old session: {e}")
+                        
                 return "Timeout disabled (will wait indefinitely for responses)"
             else:
                 self.aiohttp_session = aiohttp.ClientSession(
                     timeout=aiohttp.ClientTimeout(total=timeout_int)
                 )
+                logger.info(f"Created new aiohttp session with timeout: {timeout_int}s")
+                
+                # Close the old session asynchronously
+                if old_session:
+                    try:
+                        await old_session.close()
+                        logger.info("Closed old aiohttp session")
+                    except Exception as e:
+                        logger.warning(f"Error closing old session: {e}")
+                        
                 return f"Response timeout set to {timeout_int} seconds"
         except ValueError:
             return f"Error: Invalid number format. Please provide an integer."
@@ -1629,106 +1657,79 @@ Examples:
         return options[state] if state < len(options) else None
 
     async def run(self):
-        """Run the agent in a loop, processing user input."""
+        """Run the agent in interactive mode."""
+        # Using a try-finally block to ensure cleanup happens
         try:
-            # Define command handlers
-            self.command_handlers = {
-                # Basic commands
-                "help": self.show_help,
-                "exit": None,  # Special case handled in the loop
-                "quit": None,  # Special case handled in the loop
-                "clear": self.clear_screen,
-                "stats": self.show_session_stats,
-                "history": self.show_command_history,
-                "!!": self.repeat_last_command,
-                
-                # Model management
-                "model": self.set_model,
-                "threads": self.set_threads,
-                "gpu": self.set_gpu_layers,
-                "temperature": self.set_temperature,
-                "tokens": self.set_num_predict,
-                "ollama": self.check_ollama_status,  # New command for Ollama status
-                "timeout": self.set_timeout,
-                
-                # Enhanced commands
-                "search": self.web_search,
-                "s": self.web_search,  # Alias for search
-                "metrics": self.show_performance_metrics,
-                "nocache": self.process_nocache,  # New command for nocache
-                
-                # NetHunter/Android commands
-                "netinfo": self.get_network_info,
-                "sysinfo": self.get_system_info,
-                "battery": self.check_battery_status,
-                "optimize": self.optimize_for_battery,
-                "nh": self.execute_nethunter_command,
-                "nethunter": self.execute_nethunter_command,
-                "memory": self.show_memory_stats,
-            }
+            # Display welcome banner
+            print(self.get_welcome_banner())
             
-            # Show help on first run
-            await self.show_help()
-            
-            # Setup autocomplete
+            # Set up command completion if available
             self._setup_autocomplete()
             
-            # Mobile device memory check on startup
-            await self.check_memory_usage(True)  # Initial memory check with display
+            # Initial memory check for better user experience
+            await self.check_memory_usage(display_info=False)
             
             while True:
-                try:
-                    # Periodic memory check and garbage collection
-                    if datetime.now() - self.last_gc_time > self.gc_interval:
-                        await self.check_memory_usage()
-                        self.last_gc_time = datetime.now()
+                # Get user input
+                user_input = await self.get_user_input()
+                
+                # Handle empty input or EOF
+                if user_input is None:
+                    print("\nExiting...")
+                    break
+                
+                if not user_input.strip():
+                    continue
+                
+                # Save the command in history
+                self.command_history.add_command(user_input)
+                
+                # Exit commands
+                if user_input.lower() in ['exit', 'quit', '/exit', '/quit']:
+                    print("Exiting...")
+                    break
+                
+                # Check if it's a command (starts with /)
+                if user_input.startswith('/'):
+                    await self.process_command(user_input)
+                else:
+                    # Process as a query
+                    await self.process_query(user_input)
                     
-                    user_query = await self.get_user_input()
-                    if user_query.lower() in ["exit", "quit", "bye"]:
-                        print("Exiting...")
-                        await self.clean_up()
-                        return
+                # Run garbage collection periodically to manage memory
+                gc_now = datetime.now()
+                if gc_now - self.last_gc_time > self.gc_interval:
+                    self.last_gc_time = gc_now
+                    gc.collect()
                     
-                    if not user_query.strip():
-                        continue
-
-                    # Process commands that start with /
-                    if user_query.startswith("/"):
-                        await self.process_command(user_query)
-                        continue
-                    
-                    # Normal query processing
-                    await self.process_query(user_query)
-                    
-                except KeyboardInterrupt:
-                    print("\nInterrupted. Type /exit to quit or press Ctrl+C again to force exit.")
-                    try:
-                        await asyncio.sleep(1)
-                    except KeyboardInterrupt:
-                        print("\nForce exiting...")
-                        await self.clean_up()
-                        return
-                except Exception as e:
-                    self.logger.error(f"Error in main loop: {e}", exc_info=True)
-                    print(f"\nAn error occurred: {e}")
-                    print("Please try again or type /exit to quit.")
-        
+        except KeyboardInterrupt:
+            print("\nOperation cancelled by user. Exiting...")
         except Exception as e:
-            self.logger.error(f"Error in main loop: {e}", exc_info=True)
-            print(f"\nAn error occurred: {e}")
-            print("Please try again or type /exit to quit.")
-    
-    async def clean_up(self):
+            self.logger.error(f"Unexpected error: {e}", exc_info=True)
+            print(f"\n❌ Unexpected error: {e}")
+        finally:
+            # Always clean up resources
+            print("\nCleaning up resources...")
+            await self.cleanup()
+            print(f"Session ended. Duration: {datetime.now() - self.session_start}")
+            self.command_history.save_history()
+
+    async def cleanup(self):
         """Clean up resources before exiting."""
         try:
+            # Close aiohttp session properly
+            if hasattr(self, 'aiohttp_session') and self.aiohttp_session:
+                try:
+                    logger.info("Closing aiohttp session...")
+                    await self.aiohttp_session.close()
+                    logger.info("Aiohttp session closed successfully")
+                except Exception as e:
+                    logger.error(f"Error closing aiohttp session: {e}")
+            
             # Close database connection
             if hasattr(self, 'db') and self.db is not None:
                 self.db.close()
-            
-            # Close aiohttp session
-            if hasattr(self, 'aiohttp_session') and self.aiohttp_session is not None:
-                await self.aiohttp_session.close()
-            
+                
             # Clear any temporary files
             temp_dir = tempfile.gettempdir()
             pattern = os.path.join(temp_dir, "cellbot_*")
@@ -1745,741 +1746,10 @@ Examples:
             # Log session end
             print(f"\nSession ended. Duration: {datetime.now() - self.session_start}")
             
-        except Exception as e:
-            self.logger.error(f"Error during cleanup: {e}", exc_info=True)
-
-    async def check_battery_status(self, args: str = ""):
-        """Check and display battery status of the device."""
-        try:
-            # Try to read battery status from sysfs
-            if os.path.exists("/sys/class/power_supply/battery/capacity"):
-                with open("/sys/class/power_supply/battery/capacity", "r") as f:
-                    battery_level = int(f.read().strip())
-                
-                # Get charging status if available
-                charging_status = "unknown"
-                if os.path.exists("/sys/class/power_supply/battery/status"):
-                    with open("/sys/class/power_supply/battery/status", "r") as f:
-                        charging_status = f.read().strip()
-                
-                print("\n╭─ Battery Status ───────────────────────────────────────")
-                print(f"│  Battery Level: {battery_level}%")
-                print(f"│  Charging Status: {charging_status}")
-                print("│")
-                print("╰──────────────────────────────────────────────────────")
-                
-                return None
-            else:
-                return "Battery status not available on this device."
-        except Exception as e:
-            return f"Error checking battery status: {str(e)}"
-    
-    async def optimize_for_battery(self, args: str = ""):
-        """
-        Automatically optimize settings based on current device status.
-        Adjusts temperature and token limit based on battery level and available memory.
-        """
-        try:
-            # Try to import optimized parameters function
-            try:
-                from .android_config import get_optimal_llm_parameters
-                optimal_params = get_optimal_llm_parameters()
-                
-                # Save previous settings for reporting
-                prev_temp = self.ollama_config.get("temperature", 0.7)
-                prev_tokens = self.ollama_config.get("num_predict", 1024)
-                
-                # Apply optimized settings
-                self.ollama_config["temperature"] = optimal_params["temperature"]
-                self.ollama_config["num_predict"] = optimal_params["num_predict"]
-                
-                # Save to settings DB for persistence
-                self.settings["ollama_temperature"] = str(optimal_params["temperature"])
-                self.settings["ollama_num_predict"] = str(optimal_params["num_predict"])
-                
-                print("\n╭─ Auto-Optimization ─────────────────────────────────────")
-                print("│")
-                print("│  ✅ Settings automatically optimized for current device status")
-                print("│")
-                print(f"│  🌡️  Temperature: {prev_temp:.1f} → {optimal_params['temperature']:.1f}")
-                print(f"│  📝 Max Tokens: {prev_tokens} → {optimal_params['num_predict']}")
-                print("│")
-                
-                # Check battery if available
-                if os.path.exists("/sys/class/power_supply/battery/capacity"):
-                    with open("/sys/class/power_supply/battery/capacity", "r") as f:
-                        battery_level = int(f.read().strip())
-                    print(f"│  🔋 Current Battery: {battery_level}%")
-                
-                # Check memory
-                memory = psutil.virtual_memory()
-                print(f"│  🧠 Available Memory: {memory.available / (1024**2):.1f}MB")
-                print("│")
-                print("╰──────────────────────────────────────────────────────")
-                
-                return None
-            except (ImportError, AttributeError):
-                # Fall back to basic optimization if android_config not available
-                return "Auto-optimization is only available on mobile devices."
-                
-        except Exception as e:
-            return f"Error optimizing settings: {str(e)}"
-
-    async def show_memory_stats(self, _: str = ""):
-        """Show memory usage statistics."""
-        try:
-            import psutil
-            
-            # Get memory info
-            memory = psutil.virtual_memory()
-            swap = psutil.swap_memory()
-            
-            # Format memory sizes
-            def format_bytes(bytes_value):
-                """Format bytes to human readable format."""
-                for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-                    if bytes_value < 1024 or unit == 'TB':
-                        return f"{bytes_value:.1f} {unit}"
-                    bytes_value /= 1024
-            
-            # Track memory usage history
-            current_memory_percent = memory.percent
-            self.memory_usage_history.append(current_memory_percent)
-            
-            # Keep history at max length
-            if len(self.memory_usage_history) > self.max_history_entries:
-                self.memory_usage_history = self.memory_usage_history[-self.max_history_entries:]
-            
-            # Trend indicators
-            trend = "—"  # Default: stable
-            if len(self.memory_usage_history) > 1:
-                last_two = self.memory_usage_history[-2:]
-                diff = last_two[1] - last_two[0]
-                if diff > 2:
-                    trend = "↑"  # Increasing
-                elif diff < -2:
-                    trend = "↓"  # Decreasing
-            
-            print("\n╭─ Memory Statistics ───────────────────────────────────────")
-            print("│")
-            print(f"│  🧠 RAM: {memory.percent:.1f}% used {trend}")
-            print(f"│  • Total: {format_bytes(memory.total)}")
-            print(f"│  • Used: {format_bytes(memory.used)}")
-            print(f"│  • Available: {format_bytes(memory.available)}")
-            
-            if hasattr(swap, 'total') and swap.total > 0:
-                print("│")
-                print(f"│  💾 Swap: {swap.percent:.1f}% used")
-                print(f"│  • Total: {format_bytes(swap.total)}")
-                print(f"│  • Used: {format_bytes(swap.used)}")
-            
-            # Process info
-            current_process = psutil.Process()
-            process_memory = current_process.memory_info()
-            
-            print("│")
-            print(f"│  📊 This Process (CellBot)")
-            print(f"│  • RSS: {format_bytes(process_memory.rss)}")
-            print(f"│  • VMS: {format_bytes(process_memory.vms)}")
-            
-            if hasattr(self, 'low_memory_mode'):
-                print("│")
-                print(f"│  ⚙️ Low Memory Mode: {'Enabled' if self.low_memory_mode else 'Disabled'}")
-                print(f"│  • Threshold: {self.memory_threshold:.1f}%")
-            
-            print("╰──────────────────────────────────────────────────────────")
-            
-            # Check if memory usage is high and suggest cleanup
-            if memory.percent > 90:
-                print("\n⚠️  Warning: Memory usage is very high!")
-                print("   Consider closing other applications or reducing token limits.")
-            
-            return None
-        except Exception as e:
-            return f"Error retrieving memory statistics: {str(e)}"
-
-    async def check_memory_usage(self, display_info=False):
-        """
-        Check the current memory usage and perform garbage collection if needed.
-        This is important for mobile devices with limited resources.
-        
-        Args:
-            display_info: Whether to display memory info to the user
-        """
-        try:
-            import psutil
-            import gc
-            
-            # Get memory info
-            memory = psutil.virtual_memory()
-            
-            # If memory usage is above threshold, trigger garbage collection
-            if memory.percent > self.memory_threshold:
-                if not self.low_memory_mode:
-                    self.logger.info(f"Memory usage high ({memory.percent:.1f}%), entering low memory mode")
-                    self.low_memory_mode = True
-                
-                # Force garbage collection
-                gc.collect()
-                
-                # Clear search cache if it exists
-                if '_SEARCH_CACHE' in globals():
-                    global _SEARCH_CACHE
-                    _SEARCH_CACHE.clear()
-                    self.logger.info("Cleared search cache to free memory")
-                
-                if display_info:
-                    print(f"\n⚠️  Memory usage is high ({memory.percent:.1f}%)")
-                    print("   Automatic cleanup performed.")
-            elif memory.percent < self.memory_threshold - 10 and self.low_memory_mode:
-                # Exit low memory mode if memory usage improves significantly
-                self.low_memory_mode = False
-                self.logger.info(f"Memory usage improved ({memory.percent:.1f}%), exiting low memory mode")
-            
-            # Add to history
-            self.memory_usage_history.append(memory.percent)
-            if len(self.memory_usage_history) > self.max_history_entries:
-                self.memory_usage_history = self.memory_usage_history[-self.max_history_entries:]
-            
-            # Display memory info if requested
-            if display_info:
-                await self.show_memory_stats("")
-                
-        except Exception as e:
-            self.logger.warning(f"Error checking memory: {e}")
-            # Don't propagate errors from this utility function
-
-    async def execute_nethunter_command(self, command: str):
-        """
-        Execute a NetHunter-specific command.
-        
-        Args:
-            command: The NetHunter command to execute
-            
-        Returns:
-            The command output
-        """
-        if not command.strip():
-            return "Please provide a command to execute."
-            
-        try:
-            # Check if we're running in NetHunter environment
-            nethunter_paths = [
-                "/data/data/com.offsec.nethunter/files/home",
-                "/data/data/com.termux/files/home"
-            ]
-            
-            is_nethunter = any(os.path.exists(path) for path in nethunter_paths)
-            
-            if not is_nethunter:
-                return "This command is only available in NetHunter environment."
-            
-            # Set up the command
-            cmd_parts = command.strip().split()
-            
-            # Add sudo if appropriate
-            if cmd_parts and cmd_parts[0] in ["ifconfig", "iwconfig", "aireplay-ng", 
-                                             "airmon-ng", "airodump-ng", "aireplay-ng"]:
-                cmd_parts = ["sudo"] + cmd_parts
-            
-            # Execute the command
-            try:
-                result = subprocess.run(
-                    cmd_parts,
-                    capture_output=True,
-                    text=True,
-                    timeout=30  # Set a reasonable timeout
-                )
-                
-                output = result.stdout
-                error = result.stderr
-                
-                if result.returncode != 0 and error:
-                    return f"Error executing command: {error}"
-                
-                return output if output else "Command executed successfully (no output)."
-                
-            except subprocess.TimeoutExpired:
-                return "Command timed out after 30 seconds."
-            except subprocess.SubprocessError as e:
-                return f"Error executing command: {str(e)}"
-            
-        except Exception as e:
-            return f"Error: {str(e)}"
-
-    async def get_network_info(self, iface: str = ""):
-        """
-        Display network interface information.
-        
-        Args:
-            iface: Optional specific interface to display
-            
-        Returns:
-            Network information
-        """
-        try:
-            # Check if we're on a system with ifconfig/ip
-            is_unix = sys.platform != "win32"
-            
-            if not is_unix:
-                return "Network info is only available on Unix-like systems."
-            
-            # Determine which command to use
-            ip_available = subprocess.run(["which", "ip"], capture_output=True, text=True).returncode == 0
-            ifconfig_available = subprocess.run(["which", "ifconfig"], capture_output=True, text=True).returncode == 0
-            
-            if not (ip_available or ifconfig_available):
-                return "Network utilities (ip or ifconfig) not found."
-            
-            # Function to get interface list
-            def get_interfaces():
-                if ip_available:
-                    result = subprocess.run(["ip", "link", "show"], capture_output=True, text=True)
-                    lines = result.stdout.strip().split("\n")
-                    interfaces = []
-                    for line in lines:
-                        if ": " in line:
-                            iface_name = line.split(": ")[1].split(":")[0]
-                            interfaces.append(iface_name)
-                    return interfaces
-                elif ifconfig_available:
-                    result = subprocess.run(["ifconfig", "-a"], capture_output=True, text=True)
-                    lines = result.stdout.strip().split("\n")
-                    interfaces = []
-                    for line in lines:
-                        if line and not line.startswith(" ") and ":" in line:
-                            iface_name = line.split(":")[0].split(" ")[0]
-                            interfaces.append(iface_name)
-                    return interfaces
-                return []
-            
-            # Function to get info for a specific interface
-            def get_interface_info(interface):
-                if ip_available:
-                    link_info = subprocess.run(["ip", "link", "show", interface], capture_output=True, text=True)
-                    addr_info = subprocess.run(["ip", "addr", "show", interface], capture_output=True, text=True)
-                    return f"{link_info.stdout}\n{addr_info.stdout}".strip()
-                elif ifconfig_available:
-                    return subprocess.run(["ifconfig", interface], capture_output=True, text=True).stdout.strip()
-                return ""
-            
-            # Get all interfaces if none specified
-            interfaces = get_interfaces()
-            
-            if not interfaces:
-                return "No network interfaces found."
-            
-            # If interface specified, get info for that interface
-            if iface:
-                if iface not in interfaces:
-                    return f"Interface {iface} not found. Available interfaces: {', '.join(interfaces)}"
-                
-                info = get_interface_info(iface)
-                
-                return f"""
-╭─ Network Interface: {iface} ───────────────────────────────
-│
-{info}
-│
-╰──────────────────────────────────────────────────────────
-"""
-            
-            # Otherwise, show a summary of all interfaces
-            result = "╭─ Network Interfaces ───────────────────────────────────\n│\n"
-            
-            for iface in interfaces:
-                # Get IP addresses for this interface
-                if ip_available:
-                    addr_info = subprocess.run(
-                        ["ip", "-brief", "addr", "show", iface], 
-                        capture_output=True, 
-                        text=True
-                    ).stdout.strip()
-                    
-                    if addr_info:
-                        result += f"│  • {addr_info}\n"
-                elif ifconfig_available:
-                    iface_info = subprocess.run(
-                        ["ifconfig", iface], 
-                        capture_output=True, 
-                        text=True
-                    ).stdout.strip()
-                    
-                    # Extract IP address from ifconfig output
-                    ip_match = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", iface_info)
-                    mac_match = re.search(r"ether\s+([0-9a-f:]+)", iface_info)
-                    
-                    ip_addr = ip_match.group(1) if ip_match else "No IP"
-                    mac_addr = mac_match.group(1) if mac_match else "No MAC"
-                    
-                    result += f"│  • {iface}: {ip_addr} ({mac_addr})\n"
-            
-            result += "│\n"
-            result += "│  Use '/netinfo [interface]' for detailed information\n"
-            result += "╰──────────────────────────────────────────────────────────"
-            
-            return result
-            
-        except Exception as e:
-            return f"Error retrieving network information: {str(e)}"
-
-    async def get_system_info(self, _: str = ""):
-        """
-        Display system information.
-        
-        Returns:
-            System information
-        """
-        try:
-            import platform
-            import psutil
-            
-            # Get basic system info
-            uname = platform.uname()
-            
-            # Format memory sizes
-            def format_bytes(bytes_value):
-                """Format bytes to human readable format."""
-                for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-                    if bytes_value < 1024 or unit == 'TB':
-                        return f"{bytes_value:.1f} {unit}"
-                    bytes_value /= 1024
-            
-            # Get CPU info
-            cpu_count = psutil.cpu_count(logical=False)
-            cpu_count_logical = psutil.cpu_count(logical=True)
-            cpu_percent = psutil.cpu_percent(interval=0.5)
-            
-            # Get memory info
-            memory = psutil.virtual_memory()
-            
-            # Get disk info
-            disk = psutil.disk_usage('/')
-            
-            # Try to get Android-specific info
-            android_info = ""
-            try:
-                from .android_config import get_device_info
-                device_info = get_device_info()
-                if device_info.get("is_nethunter", False):
-                    android_info = f"""│  📱 Device: {device_info.get('device_model', 'Unknown')}
-│  📱 Android: {device_info.get('android_version', 'Unknown')}
-│"""
-            except ImportError:
-                pass
-            
-            # Format the output
-            result = f"""
-╭─ System Information ───────────────────────────────────────
-│
-│  🖥️  System: {uname.system} {uname.release}
-│  🏠 Hostname: {uname.node}
-│  🔄 Architecture: {uname.machine}
-│  🐍 Python: {platform.python_version()}
-│
-{android_info}│  💻 CPU:
-│  • Model: {uname.processor or "Unknown"}
-│  • Cores: {cpu_count} physical, {cpu_count_logical} logical
-│  • Usage: {cpu_percent}%
-│
-│  🧠 Memory:
-│  • Total: {format_bytes(memory.total)}
-│  • Used: {format_bytes(memory.used)} ({memory.percent}%)
-│  • Available: {format_bytes(memory.available)}
-│
-│  💾 Disk:
-│  • Total: {format_bytes(disk.total)}
-│  • Used: {format_bytes(disk.used)} ({disk.percent}%)
-│  • Free: {format_bytes(disk.free)}
-│
-╰──────────────────────────────────────────────────────────
-"""
-            return result
-            
-        except Exception as e:
-            return f"Error retrieving system information: {str(e)}"
-
-    async def copy_to_clipboard(self, text: str):
-        """
-        Copy text to clipboard.
-        
-        Args:
-            text: The text to copy to clipboard
-            
-        Returns:
-            Confirmation message
-        """
-        if not text.strip():
-            return "Please provide text to copy."
-            
-        try:
-            # Check platform
-            if sys.platform == "darwin":  # macOS
-                try:
-                    subprocess.run(["pbcopy"], input=text.encode(), check=True)
-                    return "Text copied to clipboard."
-                except subprocess.SubprocessError as e:
-                    return f"Failed to copy to clipboard: {e}"
-                    
-            elif sys.platform == "linux":
-                # Try different clipboard tools
-                clipboard_tools = [
-                    ["xclip", "-selection", "clipboard"],
-                    ["xsel", "--clipboard", "--input"],
-                    ["termux-clipboard-set"]
-                ]
-                
-                for tool in clipboard_tools:
-                    try:
-                        subprocess.run(tool, input=text.encode(), check=True)
-                        return "Text copied to clipboard."
-                    except (subprocess.SubprocessError, FileNotFoundError):
-                        continue
-                
-                return "No clipboard tools available. Install xclip or xsel."
-                
-            elif sys.platform == "win32":  # Windows
-                try:
-                    subprocess.run(["clip"], input=text.encode(), check=True)
-                    return "Text copied to clipboard."
-                except subprocess.SubprocessError as e:
-                    return f"Failed to copy to clipboard: {e}"
-            
-            else:
-                return f"Clipboard not supported on {sys.platform}"
-                
-        except Exception as e:
-            return f"Error copying to clipboard: {str(e)}"
-            
-    async def paste_from_clipboard(self, _: str = ""):
-        """
-        Paste text from clipboard.
-        
-        Returns:
-            The text from clipboard
-        """
-        try:
-            # Check platform
-            if sys.platform == "darwin":  # macOS
-                try:
-                    result = subprocess.run(["pbpaste"], capture_output=True, text=True)
-                    if result.returncode == 0:
-                        return result.stdout
-                    else:
-                        return "Failed to paste from clipboard."
-                except (subprocess.SubprocessError, FileNotFoundError) as e:
-                    return f"Failed to paste from clipboard: {e}"
-                    
-            elif sys.platform == "linux":
-                # Try different clipboard tools
-                clipboard_tools = [
-                    ["xclip", "-selection", "clipboard", "-o"],
-                    ["xsel", "--clipboard", "--output"],
-                    ["termux-clipboard-get"]
-                ]
-                
-                for tool in clipboard_tools:
-                    try:
-                        result = subprocess.run(tool, capture_output=True, text=True)
-                        if result.returncode == 0:
-                            return result.stdout
-                    except (subprocess.SubprocessError, FileNotFoundError):
-                        continue
-                
-                return "No clipboard tools available. Install xclip or xsel."
-                
-            elif sys.platform == "win32":  # Windows
-                # There's no direct way to get clipboard via command-line on Windows
-                return "Clipboard paste not supported on Windows in terminal mode."
-            
-            else:
-                return f"Clipboard not supported on {sys.platform}"
-                
-        except Exception as e:
-            return f"Error pasting from clipboard: {str(e)}"
-
-    def get_welcome_banner(self):
-        """Return a welcome banner for the agent."""
-        try:
-            # Try to get device info
-            device_info = ""
-            try:
-                from .android_config import get_device_info
-                info = get_device_info()
-                if info.get("is_nethunter", False):
-                    device_info = f"\n│  📱 Device: {info.get('device_model', 'Unknown')}"
-                    if info.get("android_version"):
-                        device_info += f" (Android {info.get('android_version')})"
-            except (ImportError, AttributeError):
-                pass
-                
-            # Get system info
-            import platform
-            system_info = f"│  🖥️  System: {platform.system()} {platform.release()}"
-            python_info = f"│  🐍 Python: {platform.python_version()}"
-            
-            # Format the banner
-            banner = f"""
-╭───────────────────────────────────────────────────────────╮
-│                                                           │
-│             🤖 CellBot for NetHunter v1.0                 │
-│                                                           │
-│  Model: {self.model}                                      
-{system_info}
-{python_info}{device_info}
-│                                                           │
-│  Type /help for available commands                        │
-│                                                           │
-╰───────────────────────────────────────────────────────────╯
-"""
-            return banner
-        except Exception as e:
-            # Fallback to simple banner if anything fails
-            return """
-╭───────────────────────────────────────────────╮
-│        CellBot for NetHunter v1.0             │
-│                                               │
-│        Type /help for commands                │
-╰───────────────────────────────────────────────╯
-"""
-
-    async def get_user_input(self):
-        """Get user input with command history support."""
-        try:
-            # Set up tab completion if not already done
-            if not hasattr(self, 'commands'):
-                self._setup_autocomplete()
-                
-            # Display prompt
-            prompt = "🤖> "
-            
-            # Use asyncio to allow for non-blocking input
-            loop = asyncio.get_event_loop()
-            user_input = await loop.run_in_executor(None, lambda: input(prompt))
-            
-            # Add to command history if not empty
-            if user_input.strip():
-                self.command_history.add_command(user_input)
-                
-            # Store for potential repeat
-            if not user_input.startswith('/'):
-                self.last_user_query = user_input
-                self.settings["last_user_query"] = user_input
-                
-            return user_input
-        except (EOFError, KeyboardInterrupt):
-            # Handle Ctrl+D or Ctrl+C gracefully
-            print("\nExiting...")
-            return "exit"
-        except Exception as e:
-            self.logger.error(f"Error getting user input: {e}")
-            print(f"\nError getting input: {e}")
-            return ""
-
-    async def process_command(self, command: str):
-        """Process a command (prefixed with /)."""
-        # Strip the leading /
-        if command.startswith("/"):
-            command = command[1:]
-        
-        # Extract the command and arguments
-        parts = command.split(" ", 1)
-        cmd = parts[0].lower()
-        args = parts[1] if len(parts) > 1 else ""
-        
-        # Check if we have a handler for this command
-        if cmd in self.command_handlers:
-            handler = self.command_handlers[cmd]
-            if handler:  # Some commands like 'exit' have None handler
-                try:
-                    result = await handler(args)
-                    if result:
-                        print(result)
-                except Exception as e:
-                    print(f"Error processing command: {e}")
-            else:
-                print(f"Command handler for '{cmd}' is not callable.")
-        else:
-            print(f"Unknown command: {cmd}")
-            print("Type /help for available commands.")
-
-    async def process_query(self, query: str):
-        """Process a user query (not a command)."""
-        if not query.strip():
-            return
-            
-        try:
-            # Process the query
-            response, was_cached, code_executed = await self.process_message(query)
-            
-            # Add to conversation history regardless of response
-            self.add_message("user", query)
-            self.add_message("assistant", response)
-            
-            # If there's a response, print it
-            if response:
-                # For responses where code blocks were executed, we'll split the response
-                # to extract any text outside the code blocks
-                if code_executed:
-                    # Extract all text before, after, and between code blocks
-                    non_code_text = self._extract_non_code_text(response)
-                    if non_code_text.strip():
-                        print(f"\n{non_code_text}")
-                else:
-                    # For responses with no code blocks, print the full response
-                    print(f"\n{response}")
-                
-        except asyncio.TimeoutError:
-            print("\n⚠️  Response timed out. You can try:")
-            print("  • Using /notimeout before your query")
-            print("  • Setting a longer timeout with /timeout [seconds]")
-            print("  • Simplifying your query")
-            print("  • Checking if the LLM server is running properly")
-            
-        except Exception as e:
-            self.logger.error(f"Error processing query: {e}")
-            print(f"\n❌ Error: {e}")
-            
-        # Periodically check memory usage
-        await self.check_memory_usage()
-
-    def _extract_non_code_text(self, response: str) -> str:
-        """
-        Extract text outside of code blocks in a response.
-        
-        Args:
-            response: The full LLM response
-            
-        Returns:
-            String containing only the text parts of the response
-        """
-        # Replace code blocks with a special marker
-        no_code_response = re.sub(r'```.*?```', '', response, flags=re.DOTALL)
-        
-        # Clean up any leftover markers and format
-        no_code_response = re.sub(r'\n\s*\n\s*\n', '\n\n', no_code_response)
-        no_code_response = no_code_response.strip()
-        
-        return no_code_response
-
-    async def cleanup(self):
-        """Clean up resources."""
-        try:
-            # Close resources
-            if hasattr(self, 'aiohttp_session') and self.aiohttp_session:
-                await self.aiohttp_session.close()
-            
-            # Close database connection
-            self.close()
-            
             # Clean up any background tasks
             for task in _BACKGROUND_TASKS:
                 if not task.done():
                     task.cancel()
-            
-            # Force garbage collection
-            gc.collect()
-            
+                    
         except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
-            # Continue with shutdown even if there's an error
+            self.logger.error(f"Error during cleanup: {e}", exc_info=True)
