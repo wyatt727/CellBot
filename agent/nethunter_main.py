@@ -19,7 +19,9 @@ try:
         DEFAULT_MODEL,
         MAX_CONCURRENT_LLM_CALLS,
         MAX_CONCURRENT_CODE_EXECS,
-        DEFAULT_TIMEOUT
+        DEFAULT_TIMEOUT,
+        DEFAULT_TEMPERATURE,
+        DEFAULT_NUM_PREDICT
     )
     logger.info("Android config loaded successfully")
 except ImportError:
@@ -30,6 +32,8 @@ except ImportError:
     MAX_CONCURRENT_LLM_CALLS = 2
     MAX_CONCURRENT_CODE_EXECS = 2
     DEFAULT_TIMEOUT = 180
+    DEFAULT_TEMPERATURE = 0.7
+    DEFAULT_NUM_PREDICT = 1024
     
     # Fallback functions
     def get_optimal_thread_count():
@@ -57,6 +61,10 @@ def parse_arguments():
                         help='CPU thread count for ollama')
     parser.add_argument('--gpu-layers', type=int, default=None,
                         help='GPU layer count for ollama')
+    parser.add_argument('--temperature', type=float, default=None,
+                        help=f'Temperature for LLM responses (0.0-1.0, default: {DEFAULT_TEMPERATURE})')
+    parser.add_argument('--tokens', type=int, default=None,
+                        help=f'Maximum tokens to generate in responses (default: {DEFAULT_NUM_PREDICT})')
     parser.add_argument('--no-db', action='store_true',
                         help='Disable database usage (use in-memory storage)')
                         
@@ -91,6 +99,24 @@ async def main():
         if args.gpu_layers is not None:
             agent.ollama_config["num_gpu"] = args.gpu_layers
             agent.db.set_setting("ollama_num_gpu", str(args.gpu_layers))
+            
+        # Set temperature if specified
+        if args.temperature is not None:
+            if 0.0 <= args.temperature <= 1.0:
+                agent.ollama_config["temperature"] = args.temperature
+                agent.db.set_setting("ollama_temperature", str(args.temperature))
+                logger.info(f"Temperature set to {args.temperature}")
+            else:
+                logger.warning(f"Temperature value {args.temperature} out of range (0.0-1.0), using default")
+                
+        # Set max tokens if specified
+        if args.tokens is not None:
+            if args.tokens > 0:
+                agent.ollama_config["num_predict"] = args.tokens
+                agent.db.set_setting("ollama_num_predict", str(args.tokens))
+                logger.info(f"Max tokens set to {args.tokens}")
+            else:
+                logger.warning(f"Max tokens value {args.tokens} must be positive, using default")
             
         # Start the agent
         logger.info(f"Agent initialized with model: {args.model}")

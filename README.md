@@ -84,7 +84,7 @@ This automatically:
 To run with specific options:
 
 ```bash
-./cellbot.py run.py --model mistral:7b --threads 4
+./cellbot.py run.py --model mistral:7b --threads 4 --temperature 0.7 --tokens 2048
 ```
 
 ### Advanced Usage with Setup Script
@@ -125,6 +125,8 @@ python3 nethunter_cellbot.py --model mistral:7b --threads 4
 - `--save-code`: Save generated code blocks to files
 - `--threads N`: Number of CPU threads for inference
 - `--gpu-layers N`: Number of GPU layers to use (if available)
+- `--temperature FLOAT`: Temperature for LLM responses (0.0-1.0, default: 0.5 on mobile)
+- `--tokens N`: Maximum tokens to generate in responses (default: 1536 on mobile)
 
 ## Interactive Commands
 
@@ -136,6 +138,10 @@ Once CellBot is running, you can use these commands:
 - `/clear`: Clear the screen
 - `/threads [N]`: Set CPU thread count
 - `/gpu [N]`: Set GPU layer count
+- `/temp [value]`: Set temperature (0.0-1.0) for response randomness
+- `/tokens [N]`: Set maximum tokens to generate
+- `/optimize`: Auto-optimize all settings for current device status
+- `/battery`: Check battery status
 - `/exit` or `/quit`: Exit CellBot
 
 ## NetHunter-Specific Optimizations
@@ -161,6 +167,13 @@ CellBot has been optimized for NetHunter environments in several ways:
 4. **Battery Considerations**:
    - Background operations are limited to preserve battery
    - Efficient resource cleanup when idle
+   - Adaptive temperature and token limit based on battery level
+   - Auto-detection of optimal settings for device capabilities
+
+5. **LLM Response Optimizations**:
+   - Lower temperature settings for more deterministic and efficient responses
+   - Reduced token generation limits to save battery and memory
+   - Automatic adjustment based on available RAM and battery status
 
 ## Troubleshooting
 

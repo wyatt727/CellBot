@@ -200,10 +200,24 @@ class MinimalAIAgent:
         self.in_comparison_mode = self.db.get_setting("in_comparison_mode") == "true"
         
         # Ollama-specific optimizations
+        # Try to import default values from android_config
+        try:
+            from .android_config import DEFAULT_TEMPERATURE, DEFAULT_NUM_PREDICT, get_optimal_llm_parameters
+            # Get optimal parameters based on device capabilities
+            optimal_params = get_optimal_llm_parameters()
+            default_temp = optimal_params["temperature"]
+            default_tokens = optimal_params["num_predict"]
+        except (ImportError, AttributeError):
+            # Use standard defaults if android_config is not available
+            default_temp = 0.7
+            default_tokens = 1024
+
         self.ollama_config = {
             "num_thread": os.cpu_count() or 4,  # Default to CPU count or 4
             "num_gpu": 0,  # Initialize to 0, will be set below
-            "timeout": timeout
+            "timeout": timeout,
+            "temperature": default_temp,  # Platform-optimized temperature
+            "num_predict": default_tokens  # Platform-optimized token limit
         }
         
         # Auto-detect GPU capabilities
@@ -231,6 +245,30 @@ class MinimalAIAgent:
         else:
             # No environment or DB setting, use auto-detected GPU
             self.ollama_config["num_gpu"] = auto_gpu_layers
+        
+        # Load temperature from environment or settings
+        if os.getenv("OLLAMA_TEMPERATURE"):
+            try:
+                self.ollama_config["temperature"] = float(os.getenv("OLLAMA_TEMPERATURE"))
+            except (ValueError, TypeError):
+                pass  # Use default if invalid
+        elif self.db.get_setting("ollama_temperature"):
+            try:
+                self.ollama_config["temperature"] = float(self.db.get_setting("ollama_temperature"))
+            except (ValueError, TypeError):
+                pass  # Use default if invalid
+                
+        # Load num_predict from environment or settings
+        if os.getenv("OLLAMA_NUM_PREDICT"):
+            try:
+                self.ollama_config["num_predict"] = int(os.getenv("OLLAMA_NUM_PREDICT"))
+            except (ValueError, TypeError):
+                pass  # Use default if invalid
+        elif self.db.get_setting("ollama_num_predict"):
+            try:
+                self.ollama_config["num_predict"] = int(self.db.get_setting("ollama_num_predict"))
+            except (ValueError, TypeError):
+                pass  # Use default if invalid
         
         # Performance metrics
         self.perf_metrics = {
@@ -265,6 +303,12 @@ class MinimalAIAgent:
             'bye': lambda _: "exit",
             'threads': self.set_threads,
             'gpu': self.set_gpu_layers,
+            'temperature': self.set_temperature,
+            'temp': self.set_temperature,
+            'num_predict': self.set_num_predict,
+            'tokens': self.set_num_predict,
+            'optimize': self.optimize_for_battery,
+            'auto': self.optimize_for_battery,
             'nh': self.execute_nethunter_command,
             'nethunter': self.execute_nethunter_command,
             'netinfo': self.get_network_info,
@@ -300,6 +344,9 @@ class MinimalAIAgent:
     /model [name]      - Change the AI model
     /threads [num]     - Set CPU threads (default: auto)
     /gpu [layers]      - Set GPU acceleration layers
+    /temp [value]      - Set temperature (0.0-1.0)
+    /tokens [num]      - Set max tokens to generate
+    /optimize          - Auto-optimize settings for device
     /perf              - Show performance metrics
     /memory            - Show memory usage statistics
     {'   /nocache          - Disable caching for next query' if hasattr(self, '_cache') else ''}
@@ -402,6 +449,8 @@ class MinimalAIAgent:
             print(f"│  🤖 Model: {self.model}")
             print(f"│  🔄 Threads: {self.ollama_config['num_thread']}")
             print(f"│  🖥️  GPU Layers: {self.ollama_config['num_gpu']}")
+            print(f"│  🌡️  Temperature: {self.ollama_config.get('temperature', 0.7):.1f}")
+            print(f"│  📝 Max Tokens: {self.ollama_config.get('num_predict', 1024)}")
             
             # Get performance metrics
             if hasattr(self, 'perf_metrics'):
@@ -575,6 +624,8 @@ class MinimalAIAgent:
 │  Ollama Configuration
 │  • CPU Threads : {self.ollama_config['num_thread']}
 │  • GPU Layers  : {self.ollama_config['num_gpu']}
+│  • Temperature : {self.ollama_config.get('temperature', 0.7):.1f}
+│  • Max Tokens  : {self.ollama_config.get('num_predict', 1024)}
 │
 ╰──────────────────────────────────────────────────────────"""
         
@@ -714,6 +765,8 @@ class MinimalAIAgent:
                         self.aiohttp_session,
                         num_thread=self.ollama_config["num_thread"],
                         num_gpu=self.ollama_config["num_gpu"],
+                        temperature=self.ollama_config.get("temperature"),
+                        num_predict=self.ollama_config.get("num_predict"),
                         timeout=self.ollama_config["timeout"]
                     )
                 llm_time = (datetime.now() - llm_start).total_seconds()
@@ -1096,6 +1149,8 @@ Examples:
                     self.aiohttp_session,
                     num_thread=self.ollama_config["num_thread"],
                     num_gpu=self.ollama_config["num_gpu"],
+                    temperature=self.ollama_config.get("temperature"),
+                    num_predict=self.ollama_config.get("num_predict"),
                     timeout=5  # Short timeout for testing
                 )
                 
@@ -1116,6 +1171,8 @@ Examples:
                             self.aiohttp_session,
                             num_thread=self.ollama_config["num_thread"],
                             num_gpu=self.ollama_config["num_gpu"],
+                            temperature=self.ollama_config.get("temperature"),
+                            num_predict=self.ollama_config.get("num_predict"),
                             timeout=5  # Short timeout for testing
                         )
                         
@@ -1205,6 +1262,96 @@ Examples:
         except ValueError:
             return f"Error: '{thread_count}' is not a valid number. Current count: {self.ollama_config['num_thread']}"
 
+    async def set_gpu_layers(self, gpu_layers: str) -> str:
+        """Set the number of GPU layers for Ollama.
+        
+        Args:
+            gpu_layers: String containing the number of GPU layers to use
+                       If empty, returns the current GPU layer count
+        
+        Returns:
+            A confirmation message
+        """
+        # If no argument, return current setting
+        if not gpu_layers.strip():
+            return f"Current GPU layer count: {self.ollama_config.get('num_gpu', 0)}"
+        
+        # Try to parse the GPU layer count
+        try:
+            new_gpu_layers = int(gpu_layers.strip())
+            if new_gpu_layers < 0:
+                return f"Error: GPU layer count must be non-negative. Current count: {self.ollama_config.get('num_gpu', 0)}"
+                
+            # Set the new GPU layer count
+            self.ollama_config['num_gpu'] = new_gpu_layers
+            
+            # Save to settings DB for persistence
+            self.db.set_setting("ollama_num_gpu", str(new_gpu_layers))
+            
+            return f"GPU layer count set to {new_gpu_layers}"
+        except ValueError:
+            return f"Error: '{gpu_layers}' is not a valid number. Current count: {self.ollama_config.get('num_gpu', 0)}"
+
+    async def set_temperature(self, temperature: str) -> str:
+        """Set the temperature value for LLM responses.
+        
+        Args:
+            temperature: String containing the temperature value (0.0-1.0)
+                         If empty, returns the current temperature
+        
+        Returns:
+            A confirmation message
+        """
+        # If no argument, return current setting
+        if not temperature.strip():
+            return f"Current temperature: {self.ollama_config.get('temperature', 0.7)}"
+        
+        # Try to parse the temperature
+        try:
+            new_temperature = float(temperature.strip())
+            if new_temperature < 0.0 or new_temperature > 1.0:
+                return f"Error: Temperature must be between 0.0 and 1.0. Current temperature: {self.ollama_config.get('temperature', 0.7)}"
+                
+            # Set the new temperature
+            self.ollama_config['temperature'] = new_temperature
+            
+            # Save to settings DB for persistence
+            self.db.set_setting("ollama_temperature", str(new_temperature))
+            
+            return f"Temperature set to {new_temperature}"
+        except ValueError:
+            return f"Error: '{temperature}' is not a valid number. Current temperature: {self.ollama_config.get('temperature', 0.7)}"
+
+    async def set_num_predict(self, num_predict: str) -> str:
+        """Set the maximum number of tokens to predict (response length limit).
+        
+        Args:
+            num_predict: String containing the maximum number of tokens
+                         If empty, returns the current num_predict value
+        
+        Returns:
+            A confirmation message
+        """
+        # If no argument, return current setting
+        if not num_predict.strip():
+            return f"Current max tokens (num_predict): {self.ollama_config.get('num_predict', 1024)}"
+        
+        # Try to parse the num_predict value
+        try:
+            new_num_predict = int(num_predict.strip())
+            if new_num_predict <= 0:
+                return f"Error: Max tokens must be positive. Current value: {self.ollama_config.get('num_predict', 1024)}"
+                
+            # Set the new num_predict value
+            self.ollama_config['num_predict'] = new_num_predict
+            
+            # Save to settings DB for persistence
+            self.db.set_setting("ollama_num_predict", str(new_num_predict))
+            
+            return f"Max tokens (num_predict) set to {new_num_predict}"
+        except ValueError:
+            return f"Error: '{num_predict}' is not a valid number. Current value: {self.ollama_config.get('num_predict', 1024)}"
+
     def _setup_autocomplete(self):
         """Set up command autocompletion for the agent."""
         readline.set_completer(self._command_completer)
@@ -1213,7 +1360,9 @@ Examples:
         # Set up known commands for autocompletion
         self.commands = [
             "/search", "/web", "/history", "/model", "/perf", "/notimeout", 
-            "/help", "/exit", "/quit", "/bye"
+            "/help", "/exit", "/quit", "/bye", "/threads", "/gpu", 
+            "/temp", "/temperature", "/tokens", "/num_predict",
+            "/optimize", "/auto", "/battery"
         ]
         
         self.history_commands = [
@@ -1345,3 +1494,80 @@ Examples:
             
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}", exc_info=True)
+
+    async def check_battery_status(self, args: str = ""):
+        """Check and display battery status of the device."""
+        try:
+            # Try to read battery status from sysfs
+            if os.path.exists("/sys/class/power_supply/battery/capacity"):
+                with open("/sys/class/power_supply/battery/capacity", "r") as f:
+                    battery_level = int(f.read().strip())
+                
+                # Get charging status if available
+                charging_status = "unknown"
+                if os.path.exists("/sys/class/power_supply/battery/status"):
+                    with open("/sys/class/power_supply/battery/status", "r") as f:
+                        charging_status = f.read().strip()
+                
+                print("\n╭─ Battery Status ───────────────────────────────────────")
+                print(f"│  Battery Level: {battery_level}%")
+                print(f"│  Charging Status: {charging_status}")
+                print("│")
+                print("╰──────────────────────────────────────────────────────")
+                
+                return None
+            else:
+                return "Battery status not available on this device."
+        except Exception as e:
+            return f"Error checking battery status: {str(e)}"
+    
+    async def optimize_for_battery(self, args: str = ""):
+        """
+        Automatically optimize settings based on current device status.
+        Adjusts temperature and token limit based on battery level and available memory.
+        """
+        try:
+            # Try to import optimized parameters function
+            try:
+                from .android_config import get_optimal_llm_parameters
+                optimal_params = get_optimal_llm_parameters()
+                
+                # Save previous settings for reporting
+                prev_temp = self.ollama_config.get("temperature", 0.7)
+                prev_tokens = self.ollama_config.get("num_predict", 1024)
+                
+                # Apply optimized settings
+                self.ollama_config["temperature"] = optimal_params["temperature"]
+                self.ollama_config["num_predict"] = optimal_params["num_predict"]
+                
+                # Save to settings DB for persistence
+                self.db.set_setting("ollama_temperature", str(optimal_params["temperature"]))
+                self.db.set_setting("ollama_num_predict", str(optimal_params["num_predict"]))
+                
+                print("\n╭─ Auto-Optimization ─────────────────────────────────────")
+                print("│")
+                print("│  ✅ Settings automatically optimized for current device status")
+                print("│")
+                print(f"│  🌡️  Temperature: {prev_temp:.1f} → {optimal_params['temperature']:.1f}")
+                print(f"│  📝 Max Tokens: {prev_tokens} → {optimal_params['num_predict']}")
+                print("│")
+                
+                # Check battery if available
+                if os.path.exists("/sys/class/power_supply/battery/capacity"):
+                    with open("/sys/class/power_supply/battery/capacity", "r") as f:
+                        battery_level = int(f.read().strip())
+                    print(f"│  🔋 Current Battery: {battery_level}%")
+                
+                # Check memory
+                memory = psutil.virtual_memory()
+                print(f"│  🧠 Available Memory: {memory.available / (1024**2):.1f}MB")
+                print("│")
+                print("╰──────────────────────────────────────────────────────")
+                
+                return None
+            except (ImportError, AttributeError):
+                # Fall back to basic optimization if android_config not available
+                return "Auto-optimization is only available on mobile devices."
+                
+        except Exception as e:
+            return f"Error optimizing settings: {str(e)}"

@@ -24,6 +24,8 @@ async def get_llm_response_async(
     session: Optional[aiohttp.ClientSession] = None,
     num_thread: int = None,
     num_gpu: int = None,
+    temperature: float = None,
+    num_predict: int = None,
     timeout: int = 120
 ) -> str:
     """
@@ -36,6 +38,8 @@ async def get_llm_response_async(
         session: Optional aiohttp.ClientSession
         num_thread: Number of CPU threads to use (optional)
         num_gpu: Number of GPU layers to use (optional)
+        temperature: Temperature for response sampling (optional)
+        num_predict: Maximum number of tokens to generate (optional)
         timeout: Request timeout in seconds
         
     Returns:
@@ -57,10 +61,16 @@ async def get_llm_response_async(
             options["num_thread"] = num_thread
         if num_gpu is not None:
             options["num_gpu"] = num_gpu
+        if temperature is not None:
+            options["temperature"] = temperature
+        if num_predict is not None:
+            options["num_predict"] = num_predict
             
-        # For mobile, add additional options to optimize for low resources
-        options["temperature"] = 0.7  # Lower temp = more predictable responses
-        options["num_predict"] = 1024  # Limit response length to save resources
+        # For mobile, add default options only if not already set
+        if "temperature" not in options:
+            options["temperature"] = 0.7  # Default: lower temp = more predictable responses
+        if "num_predict" not in options:
+            options["num_predict"] = 1024  # Default: limit response length to save resources
             
         request_body = {
             "model": model,
