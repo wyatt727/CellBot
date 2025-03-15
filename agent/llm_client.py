@@ -81,10 +81,9 @@ async def get_llm_response_async(
         if "num_predict" not in options:
             options["num_predict"] = 500  # Limit response length to save resources
         if "num_thread" not in options and not num_thread:
-            # Try to detect cores and use a reasonable default
+            # Use maximum available CPU threads for best performance
             import multiprocessing
-            cores = multiprocessing.cpu_count()
-            options["num_thread"] = min(4, max(2, cores - 1))  # Use fewer threads for better performance
+            options["num_thread"] = multiprocessing.cpu_count()  # Use all available cores
             
         request_body = {
             "model": model,

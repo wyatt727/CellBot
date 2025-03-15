@@ -216,7 +216,7 @@ class MinimalAIAgent:
             self._sessions_to_cleanup.append(self.aiohttp_session)
         
         # Optimized semaphores
-        self.llm_semaphore = asyncio.Semaphore(max_llm_calls)
+        # Removed LLM semaphore to allow unlimited concurrent LLM calls
         self.code_semaphore = asyncio.Semaphore(max_code_execs)
         self.command_history = CommandHistory()
         self.session_start = datetime.now()
@@ -236,7 +236,7 @@ class MinimalAIAgent:
             default_tokens = 1024
 
         self.ollama_config = {
-            "num_thread": os.cpu_count() or 4,  # Default to CPU count or 4
+            "num_thread": os.cpu_count(),  # Use maximum available CPU threads
             "num_gpu": 0,  # Initialize to 0, will be set below
             "timeout": timeout,
             "temperature": default_temp,  # Platform-optimized temperature
@@ -681,8 +681,8 @@ class MinimalAIAgent:
                     f"Please fix the code. Return only the corrected code in a single code block."
                 )
                 fix_context = [{"role": "user", "content": fix_prompt}]
-                async with self.llm_semaphore:
-                    fix_response = await get_llm_response_async(fix_context, self.model, self.aiohttp_session)
+                # Removed LLM semaphore here as well for code fixes
+                fix_response = await get_llm_response_async(fix_context, self.model, self.aiohttp_session)
                 blocks = self.extract_code_from_response(fix_response)
                 if blocks:
                     current_code = blocks[0][1]
@@ -1038,19 +1038,18 @@ class MinimalAIAgent:
                 print(f"│  ⏱  Context: {context_time:.2f}s")
             
             llm_start = datetime.now()
-            # We use the LLM semaphore here to limit concurrent API calls
+            # Removed LLM semaphore to allow unlimited concurrent API calls
             try:
-                async with self.llm_semaphore:
-                    response = await get_llm_response_async(
-                        context, 
-                        self.model, 
-                        self.aiohttp_session,
-                        temperature=self.ollama_config.get("temperature", 0.7),
-                        num_thread=self.ollama_config.get("num_thread", 4),
-                        num_gpu=self.ollama_config.get("num_gpu", 0),
-                        num_predict=self.ollama_config.get("num_predict", 1024),
-                        timeout=self.ollama_config.get("timeout", 60)
-                    )
+                response = await get_llm_response_async(
+                    context, 
+                    self.model, 
+                    self.aiohttp_session,
+                    temperature=self.ollama_config.get("temperature", 0.7),
+                    num_thread=self.ollama_config.get("num_thread", 4),
+                    num_gpu=self.ollama_config.get("num_gpu", 0),
+                    num_predict=self.ollama_config.get("num_predict", 1024),
+                    timeout=self.ollama_config.get("timeout", 60)
+                )
                 
                 # Add completion to metrics
                 self.perf_metrics["requests_count"] += 1
@@ -1140,7 +1139,7 @@ class MinimalAIAgent:
                     timeout=aiohttp.ClientTimeout(total=self.default_timeout)
                 )
 
-    def help_command(self) -> str:
+    async def help_command(self, _: str = "") -> str:
         """Return help text describing available commands."""
         return """Available commands:
 /help - Show this help message
@@ -1149,10 +1148,15 @@ class MinimalAIAgent:
 /update <id> <response> - Update the response for a successful exchange
 /compare <prompt> - Compare responses from different models
 /nocache <prompt> - Process prompt without using or saving to cache
+/threads [count|max] - View or set the number of CPU threads (use 'max' for maximum performance)
+/set_model <model> - Change the active LLM model
+/set_temperature <value> - Set temperature (0.0-1.0)
+/set_num_predict <value> - Set max tokens to generate
+/set_timeout <seconds> - Set timeout for LLM API calls
 
 Examples:
 /list python  - List exchanges containing 'python'
-/remove 123   - Remove exchange with ID 123
+/threads max  - Use maximum available CPU threads for best performance
 /nocache ls -la  - Run 'ls -la' without cache
 """
 
@@ -1557,13 +1561,25 @@ Examples:
         """
         # If no argument, return current setting
         if not thread_count.strip():
-            return f"Current CPU thread count: {self.ollama_config['num_thread']}"
+            cpu_count = os.cpu_count()
+            current_threads = self.ollama_config['num_thread']
+            if current_threads >= cpu_count:
+                return f"Using maximum CPU threads: {current_threads} (all available cores)"
+            else:
+                return f"Current CPU thread count: {current_threads} (of {cpu_count} available cores)"
         
         # Try to parse the thread count
         try:
             new_thread_count = int(thread_count.strip())
             if new_thread_count <= 0:
                 return f"Error: Thread count must be positive. Current count: {self.ollama_config['num_thread']}"
+            
+            cpu_count = os.cpu_count()
+            if thread_count.lower() == "max" or new_thread_count >= cpu_count:
+                # Use all available cores
+                self.ollama_config['num_thread'] = cpu_count
+                self.settings["ollama_num_thread"] = str(cpu_count)
+                return f"CPU thread count set to maximum ({cpu_count} cores)"
                 
             # Set the new thread count
             self.ollama_config['num_thread'] = new_thread_count
@@ -1571,8 +1587,14 @@ Examples:
             # Save to settings DB for persistence
             self.settings["ollama_num_thread"] = str(new_thread_count)
             
-            return f"CPU thread count set to {new_thread_count}"
+            return f"CPU thread count set to {new_thread_count} (of {cpu_count} available cores)"
         except ValueError:
+            if thread_count.lower() == "max":
+                # Use all available cores
+                cpu_count = os.cpu_count()
+                self.ollama_config['num_thread'] = cpu_count
+                self.settings["ollama_num_thread"] = str(cpu_count)
+                return f"CPU thread count set to maximum ({cpu_count} cores)"
             return f"Error: '{thread_count}' is not a valid number. Current count: {self.ollama_config['num_thread']}"
 
     async def set_gpu_layers(self, gpu_layers: str) -> str:
