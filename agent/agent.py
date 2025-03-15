@@ -769,6 +769,126 @@ class MinimalAIAgent:
         # Return the metrics string instead of printing it
         return metrics
 
+    async def show_memory_stats(self, _: str = ""):
+        """
+        Show detailed memory usage statistics.
+        Useful for monitoring resource usage especially on mobile devices.
+        """
+        try:
+            # Get memory information
+            memory = psutil.virtual_memory()
+            swap = psutil.swap_memory()
+            
+            # Store current memory usage in history
+            if hasattr(self, 'memory_usage_history'):
+                timestamp = datetime.now()
+                self.memory_usage_history.append((timestamp, memory.percent))
+                
+                # Keep history at reasonable size
+                if len(self.memory_usage_history) > self.max_history_entries:
+                    self.memory_usage_history.pop(0)
+            
+            # Format memory stats
+            stats = f"""
+╭─ Memory Statistics ────────────────────────────────────────
+│
+│  System Memory
+│  • Usage      : {memory.percent:.1f}% ({memory.used / (1024**3):.2f}GB/{memory.total / (1024**3):.2f}GB)
+│  • Available  : {memory.available / (1024**3):.2f}GB
+│  • Free       : {memory.free / (1024**3):.2f}GB
+│  • Cached     : {getattr(memory, 'cached', 0) / (1024**3):.2f}GB
+│
+│  Swap Memory
+│  • Usage      : {swap.percent:.1f}% ({swap.used / (1024**3):.2f}GB/{swap.total / (1024**3):.2f}GB)
+│  • Free       : {swap.free / (1024**3):.2f}GB
+│"""
+
+            # Add memory trend if we have history
+            if hasattr(self, 'memory_usage_history') and len(self.memory_usage_history) > 1:
+                stats += "│\n│  Memory Trend (last {} measurements)".format(len(self.memory_usage_history))
+                stats += "\n│  "
+                
+                # Simple ASCII chart of memory usage over time
+                for _, usage in self.memory_usage_history:
+                    if usage < 50:
+                        stats += "▁"
+                    elif usage < 60:
+                        stats += "▂"
+                    elif usage < 70:
+                        stats += "▃"
+                    elif usage < 80:
+                        stats += "▄"
+                    elif usage < 90:
+                        stats += "▅"
+                    else:
+                        stats += "▇"
+            
+            # Add Python process info
+            process = psutil.Process()
+            stats += f"""
+│
+│  Python Process
+│  • Memory     : {process.memory_info().rss / (1024**3):.3f}GB
+│  • CPU Usage  : {process.cpu_percent(interval=0.1):.1f}%
+│  • Threads    : {process.num_threads()}
+│  • Running    : {datetime.now() - datetime.fromtimestamp(process.create_time())!s}
+│
+╰──────────────────────────────────────────────────────────"""
+            
+            print(stats)
+            
+            # Do memory check and warn if necessary
+            await self.check_memory_usage(display_info=False)
+            
+            return None
+        except Exception as e:
+            return f"Error retrieving memory statistics: {str(e)}"
+    
+    async def check_memory_usage(self, display_info: bool = True) -> bool:
+        """
+        Check if memory usage is above threshold and warn if necessary.
+        
+        Args:
+            display_info: Whether to print memory information
+            
+        Returns:
+            True if memory usage is critical, False otherwise
+        """
+        try:
+            memory = psutil.virtual_memory()
+            memory_percent = memory.percent
+            
+            is_critical = memory_percent > self.memory_threshold
+            
+            if display_info:
+                print(f"\nMemory usage: {memory_percent:.1f}% ({memory.used / (1024**3):.2f}GB/{memory.total / (1024**3):.2f}GB)")
+                print(f"Available: {memory.available / (1024**3):.2f}GB")
+                
+            if is_critical:
+                # Only warn if we should display info or if usage is very high
+                if display_info or memory_percent > 95:
+                    print(f"\n⚠️  WARNING: Memory usage is high ({memory_percent:.1f}%)!")
+                    print("   Consider reducing token limit or closing other applications.")
+                    
+                # If extremely critical, force garbage collection
+                if memory_percent > 95:
+                    print("   Forcing garbage collection...")
+                    gc.collect()
+                    
+                # Reduce token limit to help mitigate high memory usage
+                if self.ollama_config.get("num_predict", 0) > 250 and memory_percent > 90:
+                    old_limit = self.ollama_config.get("num_predict", 1024)
+                    new_limit = min(old_limit, 250)
+                    self.ollama_config["num_predict"] = new_limit
+                    
+                    if display_info:
+                        print(f"   Automatically reducing token limit from {old_limit} to {new_limit} to conserve memory.")
+            
+            return is_critical
+        except Exception as e:
+            logger.warning(f"Error checking memory usage: {e}")
+            return False
+
     async def process_message(self, message: str, no_cache: bool = False) -> Tuple[str, bool, bool]:
         """Process a message and return a response.
         

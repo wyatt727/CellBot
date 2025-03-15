@@ -41,7 +41,7 @@ MAX_CONCURRENT_CODE_EXECS = 2
 DEFAULT_TIMEOUT = 180  # seconds
 MAX_RESPONSE_TOKENS = 500  # Limit token count for mobile
 DEFAULT_TEMPERATURE = 0.3  # More deterministic responses for mobile
-DEFAULT_NUM_PREDICT = 500  # Limit token generation for mobile battery savings
+DEFAULT_NUM_PREDICT = 250  # Limit token generation for mobile battery savings
 
 # Network settings
 RETRY_ATTEMPTS = 3
