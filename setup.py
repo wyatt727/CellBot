@@ -6,6 +6,7 @@ This script:
 1. Creates a Python virtual environment if it doesn't exist
 2. Installs dependencies inside the virtual environment
 3. Provides a way to run the application using the virtual environment
+4. Ensures Ollama is running if needed
 """
 
 import os
@@ -13,6 +14,7 @@ import sys
 import subprocess
 import venv
 import argparse
+import time
 from pathlib import Path
 
 # Define paths
@@ -101,6 +103,103 @@ def install_requirements():
         print(f"Unexpected error during dependency installation: {e}")
         return False
 
+def check_ollama():
+    """Check if Ollama is installed and available."""
+    try:
+        # Try to find Ollama in PATH
+        if os.name == 'nt':  # Windows
+            # Check if ollama.exe is in PATH
+            result = subprocess.run(
+                ["where", "ollama"],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                return True
+        else:  # Unix-like
+            # Check if ollama is in PATH
+            result = subprocess.run(
+                ["which", "ollama"],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                return True
+        
+        return False
+    except Exception:
+        return False
+
+def ensure_ollama_running():
+    """Ensure Ollama is running, start it if needed."""
+    print("\nChecking Ollama status...")
+    
+    # First, check if Ollama is installed
+    if not check_ollama():
+        print("❌ Ollama is not installed or not in PATH.")
+        print("Please install Ollama from https://ollama.ai")
+        return False
+    
+    # Try to list models to check if Ollama is running
+    try:
+        result = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0:
+            print("✅ Ollama is already running")
+            return True
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass  # Ollama is not running or not found
+    
+    # If we're here, Ollama is installed but not running - try to start it
+    print("Starting Ollama in the background...")
+    
+    try:
+        # Start ollama serve in the background
+        if os.name == 'nt':  # Windows
+            subprocess.Popen(
+                ["ollama", "serve"],
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        else:  # Unix-like
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+        
+        # Wait a bit for Ollama to start
+        print("Waiting for Ollama to start (this may take a few seconds)...")
+        time.sleep(5)
+        
+        # Check if it started successfully
+        result = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0:
+            print("✅ Ollama started successfully")
+            return True
+        else:
+            print("⚠️ Failed to start Ollama automatically")
+            print("Please start Ollama manually with 'ollama serve' in a separate terminal")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error starting Ollama: {e}")
+        print("Please start Ollama manually with 'ollama serve' in a separate terminal")
+        return False
+
 def run_application(args):
     """Run the application inside the virtual environment."""
     if not args:
@@ -171,6 +270,32 @@ def print_env_info():
     # Print installed packages
     print("\nInstalled packages:")
     subprocess.run([get_venv_pip(), "list"])
+    
+    # Check Ollama status
+    print("\nOllama Status:")
+    if check_ollama():
+        try:
+            result = subprocess.run(
+                ["ollama", "list"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                print("✅ Ollama is running")
+                print("Available models:")
+                # Skip the header line and print model names
+                for line in result.stdout.strip().split('\n')[1:]:
+                    if line:
+                        parts = line.split()
+                        if parts:
+                            print(f"  - {parts[0]}")
+            else:
+                print("❌ Ollama is installed but not running")
+        except:
+            print("❌ Ollama is installed but not running")
+    else:
+        print("❌ Ollama is not installed or not in PATH")
 
 def main():
     """Main entry point."""
@@ -179,13 +304,18 @@ def main():
     
     # Setup command
     setup_parser = subparsers.add_parser("setup", help="Set up the virtual environment")
+    setup_parser.add_argument("--start-ollama", action="store_true", help="Start Ollama if it's not running")
     
     # Run command
     run_parser = subparsers.add_parser("run", help="Run the application")
     run_parser.add_argument("args", nargs="*", help="Arguments to pass to the application")
+    run_parser.add_argument("--start-ollama", action="store_true", help="Start Ollama if it's not running")
     
     # Info command
     info_parser = subparsers.add_parser("info", help="Show environment information")
+    
+    # Ollama command
+    ollama_parser = subparsers.add_parser("ollama", help="Start Ollama if it's not running")
     
     args = parser.parse_args()
     
@@ -194,6 +324,11 @@ def main():
         created = create_venv()
         if created or not args.command:
             install_requirements()
+        
+        # Start Ollama if requested
+        if hasattr(args, 'start_ollama') and args.start_ollama:
+            ensure_ollama_running()
+            
         print(f"\nSetup complete. You can now run CellBot with: {sys.executable} {__file__} run")
     
     elif args.command == "run":
@@ -203,6 +338,10 @@ def main():
             create_venv()
             install_requirements()
         
+        # Start Ollama if requested
+        if hasattr(args, 'start_ollama') and args.start_ollama:
+            ensure_ollama_running()
+        
         # Run the application
         run_application(args.args)
     
@@ -211,6 +350,9 @@ def main():
             print("Virtual environment not found. Run setup first.")
             return
         print_env_info()
+    
+    elif args.command == "ollama":
+        ensure_ollama_running()
     
     else:
         parser.print_help()
